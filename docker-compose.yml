@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: catalogguard
+      POSTGRES_PASSWORD: catalogguard
+      POSTGRES_DB: catalogguard
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catalogguard -d catalogguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://catalogguard:catalogguard@db:5432/catalogguard
+      LLM_PROVIDER: stub
+      EVENT_DISPATCH: inline
+      SEED_ON_STARTUP: "true"
+      LOG_LEVEL: INFO
+      DEFAULT_LOW_STOCK_THRESHOLD: "5"
+      LOW_STOCK_COOLDOWN_SECONDS: "86400"
+    depends_on:
+      db:
+        condition: service_healthy

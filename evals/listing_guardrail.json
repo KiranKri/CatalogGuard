@@ -1,0 +1,70 @@
+[
+  {
+    "name": "cited_color_passes",
+    "attributes": {"color": "olive"},
+    "payload": {
+      "title": "Trailhead Pack",
+      "short_description": "Color olive [[color]].",
+      "long_description": "A day pack in olive [[color]].",
+      "meta_title": "Trailhead Pack",
+      "meta_description": "Olive day pack.",
+      "cited_attributes": ["color"]
+    },
+    "expect_violations": []
+  },
+  {
+    "name": "title_over_70",
+    "attributes": {"color": "olive"},
+    "payload": {
+      "title": "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT",
+      "short_description": "Color olive [[color]].",
+      "long_description": "A day pack in olive [[color]].",
+      "meta_title": "Trailhead Pack",
+      "meta_description": "Olive day pack.",
+      "cited_attributes": ["color"]
+    },
+    "expect_prefixes": ["max_length:title:"]
+  },
+  {
+    "name": "invented_attribute",
+    "attributes": {"color": "olive"},
+    "payload": {
+      "title": "Trailhead Pack",
+      "short_description": "Waterproof [[waterproof_rating]].",
+      "long_description": "Claims [[waterproof_rating]].",
+      "meta_title": "Trailhead Pack",
+      "meta_description": "A pack.",
+      "cited_attributes": ["waterproof_rating"]
+    },
+    "expect_violations": [
+      "unknown_attribute:waterproof_rating",
+      "unknown_citation:waterproof_rating"
+    ]
+  },
+  {
+    "name": "cited_value_missing",
+    "attributes": {"color": "olive"},
+    "payload": {
+      "title": "Trailhead Pack",
+      "short_description": "Color [[color]].",
+      "long_description": "A day pack [[color]].",
+      "meta_title": "Trailhead Pack",
+      "meta_description": "A day pack.",
+      "cited_attributes": ["color"]
+    },
+    "expect_violations": ["value_not_in_text:color"]
+  },
+  {
+    "name": "wrong_value_beside_citation",
+    "attributes": {"capacity_l": 28, "color": "olive"},
+    "payload": {
+      "title": "Trailhead 28 Pack",
+      "short_description": "A 35 liter [[capacity_l]] pack.",
+      "long_description": "Olive [[color]] day pack.",
+      "meta_title": "Trailhead 28 Pack",
+      "meta_description": "Olive day pack.",
+      "cited_attributes": ["capacity_l", "color"]
+    },
+    "expect_violations": ["value_not_in_text:capacity_l"]
+  }
+]
