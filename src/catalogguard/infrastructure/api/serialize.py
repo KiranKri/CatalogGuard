@@ -1,7 +1,8 @@
 """Domain objects to JSON-ready dicts."""
 
+from catalogguard.application.queries import DeadLetterView
+from catalogguard.application.redrive import RedriveResult
 from catalogguard.domain.models import (
-    DeadLetter,
     EmailDraft,
     EmailHandoff,
     EmailSuppression,
@@ -123,7 +124,8 @@ def handoff_out(handoff: EmailHandoff) -> dict[str, object]:
     }
 
 
-def dead_letter_out(letter: DeadLetter) -> dict[str, object]:
+def dead_letter_out(view: DeadLetterView) -> dict[str, object]:
+    letter = view.letter
     return {
         "id": letter.id,
         "event_id": letter.event_id,
@@ -133,6 +135,21 @@ def dead_letter_out(letter: DeadLetter) -> dict[str, object]:
         "error": letter.error,
         "attempts": letter.attempts,
         "created_at": letter.created_at.isoformat(),
+        "redrive_count": view.redrive_count,
+        "last_redrive_status": view.last_redrive_status,
+        "last_redriven_at": (
+            None if view.last_redriven_at is None else view.last_redriven_at.isoformat()
+        ),
+    }
+
+
+def redrive_out(result: RedriveResult) -> dict[str, object]:
+    return {
+        "dead_letter_id": result.dead_letter_id,
+        "handler": result.handler,
+        "result": result.result,
+        "replayed": result.replayed,
+        "redrive_id": result.redrive_id,
     }
 
 

@@ -245,7 +245,8 @@ A suppression added after a draft was already decided does not change that decis
 | GET | `/api/v1/email-drafts` | Queued email drafts |
 | POST/GET | `/api/v1/email-suppressions` | Suppress an opaque customer id (`customer_id`, `reason`). Duplicate is 409. GET is paginated |
 | GET | `/api/v1/email-handoffs` | Handoff decisions. Filters `status`, `sku`, `store_id`, plus `limit` and `offset`. There is no send route |
-| GET | `/api/v1/dead-letters` | Handlers that exhausted retries |
+| GET | `/api/v1/dead-letters` | Handlers that exhausted retries, with `redrive_count`, `last_redrive_status`, and `last_redriven_at` |
+| POST | `/api/v1/dead-letters/{id}/redrive` | Run only that letter's handler on its stored event. No body. The letter is kept. `outbox_decode` is 409. Nothing is sent |
 
 Inventory conflicts:
 
@@ -271,7 +272,25 @@ Inline dispatch keeps the request open for the LLM call. That is the right demo 
 
 **Idempotency.** The inventory write, the idempotency record, and the `InventoryChanged` outbox row commit in one transaction. A client retry with the same key returns the stored response and does not apply the write again. If the process dies after that commit and before the drain, the next request's drain (and the drain on startup) delivers the unpublished row. Handlers are safe to run again: threshold evaluation records `processed_events` in the same transaction as the downstream outbox row, listing drafts are unique on `trigger_event_id`, and email drafts are unique on `dedupe_key`.
 
-**Failure modes.** A listing or email failure does not roll back the stock count. Malformed model output is retried, then written to `dead_letters`. A validation failure is deterministic, so it is stored on the draft and not retried. The email handler still runs if the listing handler fails. A crossing inside the cooldown is discarded. A dead-lettered threshold evaluation can be recovered by the manual rewrite endpoint, which does not queue a second email by itself. Permanent LLM errors (for example HTTP 400) are not retried inside the provider. Transport errors and HTTP 429/5xx are.
+**Failure modes.** A listing or email failure does not roll back the stock count. Malformed model output is retried, then written to `dead_letters`. A validation failure is deterministic, so it is stored on the draft and not retried. The email handler still runs if the listing handler fails. A crossing inside the cooldown is discarded. Permanent LLM errors (for example HTTP 400) are not retried inside the provider. Transport errors and HTTP 429/5xx are.
+
+**Recovering a dead letter.** `POST /api/v1/dead-letters/{id}/redrive` takes no body and runs only that letter's handler (`threshold_evaluation`, `listing_rewrite`, or `email_draft`) once, on the event stored with the letter.
+
+- **Scope.** It does not go back through the outbox, so the other subscribers for that event do not run again. It does not retry, and it never writes a new dead letter.
+- **The letter.** It is kept. Each attempt is a row in `dead_letter_redrives`, and `GET /api/v1/dead-letters` shows `redrive_count`, `last_redrive_status`, and `last_redriven_at`.
+- **After a success.** A second POST returns `"result": "replayed"` without running the handler.
+- **After a failure.** The handler's error keeps its usual status (429 `llm_cost_limit`, 404, 502 `malformed_llm_output`, or 500). It is recorded as `failed`, and a later POST can try again.
+- **Threshold letters.** A threshold redrive writes `LowInventoryDetected` and then drains once, so the listing and email drafts exist when it returns. If that drain fails, the redrive still returns success and the failure is logged.
+- **Listing letters.** A listing redrive goes through the normal daily LLM cap. It spends one call when no draft exists yet for that trigger. It spends nothing, and returns the existing draft, when one does.
+- **Email letters.** A recovered email draft is `queued` like any other, and a sold-out event still queues none. Nothing is sent, and no handoff is recorded until the handoff worker runs.
+- **Refusals.** An `outbox_decode` letter returns 409 `Undecodable outbox rows cannot be redriven`, and the row is not put back on the outbox. A payload that no longer decodes, or a handler name that is not registered, is also 409. None of these refusals records an attempt.
+
+`catalogguard_dead_letter_redrives_total{result}` counts `succeeded`, `failed`, `rejected` (the refusals and unknown ids), and `replayed`. A redrive never increments `catalogguard_dead_letters_total`.
+
+```powershell
+curl.exe -s "http://127.0.0.1:8000/api/v1/dead-letters"
+curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/redrive"
+```
 
 **Inventory versus listing consistency.** The stock row is the source of truth for quantity. Listing copy is a proposal in `listing_drafts`. Those writes are separate transactions on purpose: a model outage must not block a stock update, and a draft must not change what the storefront shows until someone accepts it. Readers can observe a new quantity before a draft exists when dispatch is async, or when the handler is still retrying. They must not assume the live SEO fields moved. They did not.
 
@@ -283,11 +302,22 @@ Inline dispatch keeps the request open for the LLM call. That is the right demo 
 
 **Kafka and more than one instance.** Keep writing the outbox in the state-change transaction. The API drain already claims rows. The next move is a publisher that produces leased rows to `catalogguard.events` with key `{sku}|{store_id}`, then marks `published_at`. Run listing rewrite and email drafts as consumers when that work should leave the API process. The skeleton is `KafkaEventBus` in `infrastructure/events/kafka.py`. It raises if called. The swap is described in `adr/0001-kafka-event-bus.md`. SQS is the same shape with a visibility timeout and a dead-letter queue.
 
-**Migrations.** Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
+**Migrations.** Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. Revision `c81f0f63dcdc` (`dead_letter_redrive`) adds `dead_letter_redrives` on top of that. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
 
 ## Tests
 
 `make test` covers threshold resolution, crossing edges, cooldown, flapping, optimistic concurrency, idempotent inventory updates, event-bus retry and dead letter, outbox leases, listing generation (stub, malformed output, validation failure), the guardrail eval file, publish, the daily LLM cap, an Alembic upgrade, and an API test of the full low-inventory path. `tests/integration/test_email_handoff.py` covers the handoff worker: New York recipients, one suppressed customer, all suppressed, a draft with no recipients, expiry and its boundary, the sold-out skip, oldest-first batching, filters, a second run, a lost race that must not overwrite, duplicate suppressions, and the `python -m catalogguard.mailer` entry point on a fresh database.
+
+`tests/integration/test_dead_letter_redrive.py` covers the redrive endpoint:
+
+- recovering malformed model output, then replaying without calling the handler or the model
+- concurrent POSTs
+- the daily cap: 429 on the same UTC day, success the next day
+- refusing `outbox_decode`, unknown ids, undecodable payloads, and unregistered handlers
+- email recovery that keeps one listing draft and one queued email
+- threshold recovery that drains into both drafts without a handoff
+- a drain failure after a successful redrive
+- a failed attempt, truncated to 2000 characters, followed by a successful retry
 
 `make lint` runs Ruff.
 

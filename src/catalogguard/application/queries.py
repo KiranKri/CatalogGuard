@@ -1,12 +1,46 @@
 """Read models that are not owned by a write use case."""
 
+from dataclasses import dataclass
+from datetime import datetime
+
 from catalogguard.application.ports import UnitOfWorkFactory
-from catalogguard.domain.models import DeadLetter
+from catalogguard.domain.models import DeadLetter, DeadLetterRedrive
+
+
+@dataclass(frozen=True)
+class DeadLetterView:
+    letter: DeadLetter
+    redrive_count: int
+    last_redrive_status: str | None
+    last_redriven_at: datetime | None
 
 
 class DeadLetterService:
     def __init__(self, uow_factory: UnitOfWorkFactory) -> None:
         self._uow_factory = uow_factory
+
+    async def list_with_redrives(self, *, limit: int, offset: int) -> list[DeadLetterView]:
+        """Letters plus their redrive history. "Last" is newest created_at, then greatest id."""
+
+        async with self._uow_factory() as uow:
+            letters = await uow.dead_letters.list(limit=limit, offset=offset)
+            attempts = await uow.redrives.for_letters([letter.id for letter in letters])
+        by_letter: dict[str, list[DeadLetterRedrive]] = {}
+        for attempt in attempts:
+            by_letter.setdefault(attempt.dead_letter_id, []).append(attempt)
+        views: list[DeadLetterView] = []
+        for letter in letters:
+            rows = by_letter.get(letter.id, [])
+            last = max(rows, key=lambda row: (row.created_at, row.id)) if rows else None
+            views.append(
+                DeadLetterView(
+                    letter=letter,
+                    redrive_count=len(rows),
+                    last_redrive_status=None if last is None else last.status,
+                    last_redriven_at=None if last is None else last.created_at,
+                )
+            )
+        return views
 
     async def list(self, *, limit: int, offset: int) -> list[DeadLetter]:
         async with self._uow_factory() as uow:

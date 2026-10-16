@@ -219,6 +219,17 @@ class DeadLetterResponse(BaseModel):
     error: str
     attempts: int
     created_at: str
+    redrive_count: int
+    last_redrive_status: str | None
+    last_redriven_at: str | None
+
+
+class DeadLetterRedriveResponse(BaseModel):
+    dead_letter_id: str
+    handler: str
+    result: str
+    replayed: bool
+    redrive_id: str
 
 
 class ProductPage(BaseModel):

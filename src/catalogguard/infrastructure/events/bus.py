@@ -28,6 +28,12 @@ from catalogguard.infrastructure.events.serialize import dump_event, load_event
 log = logging.getLogger(__name__)
 
 
+def handler_name(handler: object) -> str:
+    """The name stored on dead letters, and the key a redrive looks up."""
+
+    return str(getattr(handler, "name", handler.__class__.__name__))
+
+
 class InProcessEventBus:
     def __init__(
         self,
@@ -58,6 +64,14 @@ class InProcessEventBus:
 
     def subscribe(self, event_type: str, handler: object) -> None:
         self._handlers.setdefault(event_type, []).append(handler)
+
+    def handler_for(self, event_type: str, name: str) -> object | None:
+        """The subscribed instance named `name` for `event_type`, or None."""
+
+        for handler in self._handlers.get(event_type, []):
+            if handler_name(handler) == name:
+                return handler
+        return None
 
     async def publish(self, event: DomainEvent, outbox: object) -> None:
         await outbox.add(event)  # type: ignore[attr-defined]
@@ -165,7 +179,7 @@ class InProcessEventBus:
         await asyncio.gather(*(self._run_one(handler, event) for handler in handlers))
 
     async def _run_one(self, handler: object, event: DomainEvent) -> None:
-        name = str(getattr(handler, "name", handler.__class__.__name__))
+        name = handler_name(handler)
         structlog.contextvars.bind_contextvars(
             event_id=event.event_id,
             event_type=event.event_type,

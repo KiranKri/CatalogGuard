@@ -66,3 +66,68 @@ A downstream email handoff step. CatalogGuard still sends nothing. A one-shot wo
 - **No index for the pending query.** I did not add an index on `email_drafts (status, created_at)`. The pending query is an anti-join backed by the unique index on `email_handoffs.email_draft_id`. At volume, a partial index on queued drafts would be the next step.
 - **Run aborts on non-conflict errors.** If one draft fails with something other than the unique conflict, for example a database outage, the run stops there and the CLI exits non-zero. Decisions already committed are kept, and the next run continues.
 - **Out of scope.** No changes to thresholds, cooldown, listing validation, the LLM providers, Docker, or the earlier review fixes. Nothing was committed, and this directory is not a git repository.
+
+---
+
+# DEV_NOTES: dead-letter redrive
+
+The email handoff notes above are unchanged from when that feature landed. Their test count (54) was the suite size at that time. The repository has since been committed as `8deb824`. This feature is committed separately on top of it.
+
+## What I built
+
+Operators can recover a handler dead letter without SQL and without replaying every subscriber on that event.
+
+- **Endpoint.** `POST /api/v1/dead-letters/{id}/redrive` takes no body; a body is ignored. It decodes the stored event and calls `handle` once on the one subscribed handler instance whose name matches the letter. There is no `_run_one`, no retry, and no new dead letter, whatever happens. The letter is never edited or deleted, and nothing goes back onto the outbox.
+- **Table.** `dead_letter_redrives`: `id`, `dead_letter_id` (FK `fk_dead_letter_redrives_dead_letter_id`), `status` (check `ck_dead_letter_redrive_status`: `succeeded` or `failed`), `error` (empty on success, otherwise truncated to 2000 characters), `created_at`, and index `ix_dead_letter_redrives_dead_letter_id`. It is in the ORM and in the new revision `migrations/versions/c81f0f63dcdc_dead_letter_redrive.py`, whose `down_revision` is `15e685dc71f6`. The downgrade drops the table. The earlier revisions are untouched.
+- **Rules.** In `application/redrive.py`, `DeadLetterRedriveService` applies them in order:
+  1. An unknown id is 404.
+  2. `outbox_decode` is 409 `Undecodable outbox rows cannot be redriven`. `load_event` is not called and nothing is inserted.
+  3. If any `succeeded` row exists, the response is 200 `replayed` with the oldest success row's id, and the handler is not called.
+  4. A payload that fails to decode is 409.
+  5. A handler name that is not registered is 409.
+  6. Otherwise the handler runs once. On success, the service commits a `succeeded` row, then calls `drain()` once and returns 200. On any exception, it commits a `failed` row and re-raises, so the existing mappings answer: `CostLimitError` 429, `NotFoundError` 404, `MalformedLLMOutputError` 502, `ConflictError` 409, and anything else 500. A failed row never blocks the next POST.
+- **Handler lookup.** `InProcessEventBus.handler_for(event_type, name)` is the new public lookup. `_run_one` and the lookup share one `handler_name()` helper, so the name stored on a letter and the name looked up cannot drift. The application service sees the bus through two small ports in `application/ports.py`, `HandlerRegistry` and `EventHandler`. It gets `load_event` injected as `decode_event`, so the application layer still does not import infrastructure.
+- **List fields.** `GET /api/v1/dead-letters` keeps its pagination and adds `redrive_count`, `last_redrive_status`, and `last_redriven_at`. "Last" is the newest `created_at`, then the greatest `id`.
+- **Metrics and logs.** `catalogguard_dead_letter_redrives_total{result}` with `succeeded`, `failed`, `rejected`, and `replayed`, incremented once per POST. `catalogguard_dead_letters_total` is never touched by a redrive, and its `handler` label is unchanged. The log line is `dead_letter_redriven` with the letter id, handler, event id, and result. The payload is never logged.
+- **Docs.** README has a "Recovering a dead letter" paragraph in the production notes, two API table rows, a placeholder `curl.exe` example, the migrations note, and the tests note.
+
+## Where I adapted the prompt to the repository
+
+- **Unknown ids count as `rejected`.** The prompt says to count every POST once and defines `rejected` as the 409 refusals. An unknown id is also a refusal that runs no handler and inserts no row, so it is counted as `rejected` rather than left uncounted.
+- **Drain-failure counter.** `InProcessEventBus.drain()` already increments `catalogguard_drain_failures_total` in inline mode before it re-raises. The redrive's quiet drain only logs, as `InventoryService` does after a committed write, so the counter moves exactly once. A test asserts +1. Incrementing again in the redrive would double count.
+- **Same-process concurrency.** The service holds a per-letter `asyncio.Lock` in a `WeakValueDictionary`. Two concurrent POSTs in one process serialize: the first runs the handler, and the second replays. Across processes there is no lock (see below).
+- **`list` kept as is.** `DeadLetterService.list` still returns plain `DeadLetter` objects, because `tests/unit/test_event_bus.py` reads `.handler` and `.attempts` from it. The HTTP list uses a new `list_with_redrives` that returns a `DeadLetterView`.
+- **Head revision in the migration test.** `tests/integration/test_migrations.py` asserted `alembic_version == 15e685dc71f6`. The prompt asks for the new head, so that assertion now expects `c81f0f63dcdc`, and the test also checks through Alembic's script directory that `15e685dc71f6` is its parent. The new table's columns, index, and foreign key are asserted alongside the earlier tables.
+- **Empty error messages.** An exception with an empty message is recorded with its class name, so a `failed` row always says something.
+
+## How I tested
+
+- **Suite and lint.** `make test`: 64 passed, which is the 54 tests from before plus 10 in `tests/integration/test_dead_letter_redrive.py`. `make lint`: Ruff check and format clean.
+- **New tests:**
+  - **Malformed listing output.** The same `FixedLLM` is switched to valid JSON with the new `set_content`. One `ready` draft for the letter's trigger, one `queued` email, the letter kept, and `last_redrive_status` `succeeded`. A second POST replays: a spy on `handle` sees no call, `FixedLLM.calls` does not move, and the dead-letter counter is unchanged.
+  - **Concurrent POSTs.** One `succeeded`, one `replayed`, and one LLM call.
+  - **Daily cap.** With a cap of 1: 429 `llm_cost_limit` on the same UTC day, recorded as `failed`, with only the manual draft present. After `FakeClock.advance(days=1)` the redrive succeeds and a draft exists for the letter's trigger id. Still one letter, and the dead-letter counter is unchanged.
+  - **`outbox_decode`.** 409 with the exact message, the letter kept, `redrive_count` 0, the outbox row count unchanged, and `rejected` +1.
+  - **Other refusals.** An unknown id is 404. An undecodable payload and an unregistered handler name are each 409 with their messages, and no row is written.
+  - **Email recovery.** `handle` is patched to raise during the crossing and then restored. The redrive creates exactly one `queued` email, and the listing draft count stays 1. A second POST replays without calling `handle`.
+  - **Threshold recovery.** A `threshold_evaluation` letter is inserted through the repository with `dump_event` of an `InventoryChanged` 10 → 2. The redrive returns with one listing draft, whose trigger is the UUID5 of the inventory event id, and one `queued` email already present. No `email_handoffs` row exists. A second POST replays and the counts do not change.
+  - **Drain failure.** The bus's drain is forced to raise after a successful threshold redrive. The redrive still returns 200, the drain-failure counter moves +1, and no new dead letter is written.
+  - **Failed attempt, then retry.** A generic handler error propagates (500). The `failed` row's error is truncated to exactly 2000 characters. After the clock moves, a retry succeeds: `redrive_count` 2, last status `succeeded`.
+- **Migration check, run but not added to the suite.** Alembic `compare_metadata` against a SQLite file upgraded to head reported no difference from the ORM. Downgrading to `15e685dc71f6` removed the table, and upgrading again restored it.
+- **Live smoke test.** On a scratch database with `LLM_DAILY_CAP_PER_SKU=1`:
+  1. Seeded the database, started uvicorn, sent a manual rewrite, then the crossing PUT.
+  2. The redrive (sent with a JSON body, which was ignored) returned 429 and was listed as `failed`, with `redrive_count` 1.
+  3. An unknown id returned 404.
+  4. `/metrics` showed `failed` 1 and `rejected` 1, with `catalogguard_dead_letters_total{handler="listing_rewrite"}` still 1.
+  5. The server was stopped.
+- **Local database.** I deleted `catalogguard.db` and re-ran `make seed`. Both are recorded in the final check below.
+
+## What I deliberately did not do
+
+- **No lock across processes.** Two API processes that receive the first POST for the same letter at the same moment can both run the handler. The handlers' own idempotency keeps it to one listing draft (unique trigger id), one email draft (unique dedupe key), and one `LowInventoryDetected` (`processed_events` plus the UUID5 id). A concurrent listing redrive can still spend two LLM calls, and two `succeeded` rows can exist. The replay then returns the oldest. A unique partial index on successful rows, or a row lock, would close that. I left it out because more than one row per letter is allowed by design.
+- **No retrying or rewriting.** No retry loop, no replacement payload, and no editing, deleting, or archiving of dead letters.
+- **No bulk or automatic redrive.** No bulk redrive, no CLI, and no scheduled redrive.
+- **No redrive of `outbox_decode` rows.** Those need a human to fix or discard the raw row.
+- **No auth.** The endpoint is as unauthenticated as the rest of the API. A listing redrive spends LLM budget through the normal per-SKU cap.
+- **No Postgres run.** Docker is not available here, so the redrive path ran only on SQLite.
+- **Out of scope.** No changes to thresholds, cooldown, listing validation, citation rules, the LLM providers, the handoff decision rules, the prompt text, Compose, or inline dispatch.

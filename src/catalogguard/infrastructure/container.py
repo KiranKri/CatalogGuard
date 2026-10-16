@@ -16,12 +16,14 @@ from catalogguard.application.inventory import InventoryService
 from catalogguard.application.listing import ListingService
 from catalogguard.application.ports import Clock, LLMProvider, Metrics, UnitOfWorkFactory
 from catalogguard.application.queries import DeadLetterService
+from catalogguard.application.redrive import DeadLetterRedriveService
 from catalogguard.application.thresholds import ThresholdService
 from catalogguard.infrastructure.clock import SystemClock
 from catalogguard.infrastructure.config import Settings
 from catalogguard.infrastructure.db.session import create_db_engine, create_session_factory
 from catalogguard.infrastructure.db.uow import SqlUnitOfWorkFactory
 from catalogguard.infrastructure.events.bus import InProcessEventBus
+from catalogguard.infrastructure.events.serialize import load_event
 from catalogguard.infrastructure.llm.openai_compatible import OpenAICompatibleProvider
 from catalogguard.infrastructure.llm.retrying import RetryingLLM
 from catalogguard.infrastructure.llm.stub import StubLLM
@@ -42,6 +44,7 @@ class Container:
     suppressions: EmailSuppressionService
     handoffs: EmailHandoffService
     dead_letters: DeadLetterService
+    redrives: DeadLetterRedriveService
 
 
 @dataclass
@@ -174,6 +177,14 @@ def build_runtime(
         suppressions=EmailSuppressionService(uow_factory, clock),
         handoffs=build_handoff_service(settings, uow_factory, clock=clock, metrics=metrics),
         dead_letters=DeadLetterService(uow_factory),
+        redrives=DeadLetterRedriveService(
+            uow_factory,
+            handlers=bus,
+            bus=bus,
+            decode_event=load_event,
+            metrics=metrics,
+            clock=clock,
+        ),
     )
     return Runtime(
         settings=settings,

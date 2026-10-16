@@ -13,6 +13,7 @@ from catalogguard.domain.errors import InvalidRequestError
 from catalogguard.domain.models import Product
 from catalogguard.infrastructure.api.schemas import (
     DeadLetterPage,
+    DeadLetterRedriveResponse,
     EmailDraftPage,
     EmailHandoffPage,
     EmailSuppressionCreate,
@@ -44,6 +45,7 @@ from catalogguard.infrastructure.api.serialize import (
     inventory_out,
     page,
     product_out,
+    redrive_out,
     store_listing_out,
     store_out,
     suppression_out,
@@ -399,5 +401,23 @@ async def list_dead_letters(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict[str, object]:
-    rows = await _container(request).dead_letters.list(limit=limit, offset=offset)
+    rows = await _container(request).dead_letters.list_with_redrives(limit=limit, offset=offset)
     return page([dead_letter_out(item) for item in rows], limit=limit, offset=offset)
+
+
+@router.post(
+    "/dead-letters/{dead_letter_id}/redrive",
+    response_model=DeadLetterRedriveResponse,
+    tags=["ops"],
+    responses={
+        404: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+        429: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+    },
+)
+async def redrive_dead_letter(dead_letter_id: str, request: Request) -> dict[str, object]:
+    """Run only this letter's handler on its stored event. No body. Nothing is sent."""
+
+    result = await _container(request).redrives.redrive(dead_letter_id)
+    return redrive_out(result)

@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from alembic.script import ScriptDirectory
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -60,6 +62,23 @@ def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
     assert [(row[2], row[3], row[4]) for row in foreign_keys] == [
         ("email_drafts", "email_draft_id", "id")
     ]
+    assert "dead_letter_redrives" in tables
+    redrive_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(dead_letter_redrives)")
+    }
+    assert redrive_columns == {"id", "dead_letter_id", "status", "error", "created_at"}
+    redrive_indexes = {
+        row[1] for row in connection.execute("PRAGMA index_list(dead_letter_redrives)")
+    }
+    assert "ix_dead_letter_redrives_dead_letter_id" in redrive_indexes
+    redrive_keys = list(connection.execute("PRAGMA foreign_key_list(dead_letter_redrives)"))
+    assert [(row[2], row[3], row[4]) for row in redrive_keys] == [
+        ("dead_letters", "dead_letter_id", "id")
+    ]
     version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert version == ("15e685dc71f6",)
+    assert version == ("c81f0f63dcdc",)
     connection.close()
+
+    scripts = ScriptDirectory(str(_ROOT / "migrations"))
+    assert scripts.get_current_head() == "c81f0f63dcdc"
+    assert scripts.get_revision("c81f0f63dcdc").down_revision == "15e685dc71f6"

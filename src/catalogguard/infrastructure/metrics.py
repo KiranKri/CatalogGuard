@@ -34,6 +34,12 @@ HANDOFFS = Counter(
     ["result"],
     registry=REGISTRY,
 )
+REDRIVES = Counter(
+    "catalogguard_dead_letter_redrives_total",
+    "Dead-letter redrive requests by outcome: succeeded, failed, rejected, replayed.",
+    ["result"],
+    registry=REGISTRY,
+)
 DEAD_LETTERS = Counter(
     "catalogguard_dead_letters_total",
     "Events written to the dead-letter table.",
@@ -71,6 +77,9 @@ class PrometheusMetrics:
 
     def handoff(self, result: str) -> None:
         HANDOFFS.labels(result=result).inc()
+
+    def redrive(self, result: str) -> None:
+        REDRIVES.labels(result=result).inc()
 
     def dead_letter(self, handler: str) -> None:
         DEAD_LETTERS.labels(handler=handler).inc()

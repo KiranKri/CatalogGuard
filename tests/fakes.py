@@ -20,6 +20,11 @@ class FixedLLM:
         self.calls = 0
         self.prompts: list[str] = []
 
+    def set_content(self, content: str | Exception) -> None:
+        """Change what later calls return. Services keep holding this same object."""
+
+        self._content = content
+
     async def complete(self, *, system: str, user: str):
         del system
         self.calls += 1

@@ -12,6 +12,7 @@ from catalogguard.domain.events import DomainEvent
 from catalogguard.domain.models import (
     CooldownState,
     DeadLetter,
+    DeadLetterRedrive,
     EmailDraft,
     EmailHandoff,
     EmailSuppression,
@@ -26,6 +27,7 @@ from catalogguard.domain.models import (
 from catalogguard.infrastructure.db.orm import (
     CooldownORM,
     DeadLetterORM,
+    DeadLetterRedriveORM,
     EmailDraftORM,
     EmailHandoffORM,
     EmailSuppressionORM,
@@ -817,9 +819,36 @@ class InteractionRepository:
         return [_interaction(row) for row in rows]
 
 
+def _dead_letter(row: DeadLetterORM) -> DeadLetter:
+    return DeadLetter(
+        id=row.id,
+        event_id=row.event_id,
+        event_type=row.event_type,
+        handler=row.handler,
+        payload=_copy_dict(row.payload),
+        error=row.error,
+        attempts=row.attempts,
+        created_at=_as_utc(row.created_at),
+    )
+
+
+def _redrive(row: DeadLetterRedriveORM) -> DeadLetterRedrive:
+    return DeadLetterRedrive(
+        id=row.id,
+        dead_letter_id=row.dead_letter_id,
+        status=row.status,
+        error=row.error,
+        created_at=_as_utc(row.created_at),
+    )
+
+
 class DeadLetterRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get(self, letter_id: str) -> DeadLetter | None:
+        row = await self._session.get(DeadLetterORM, letter_id)
+        return None if row is None else _dead_letter(row)
 
     async def add(self, letter: DeadLetter) -> None:
         self._session.add(
@@ -843,16 +872,47 @@ class DeadLetterRepository:
             .offset(offset)
         )
         rows = (await self._session.scalars(stmt)).all()
-        return [
-            DeadLetter(
-                id=row.id,
-                event_id=row.event_id,
-                event_type=row.event_type,
-                handler=row.handler,
-                payload=_copy_dict(row.payload),
-                error=row.error,
-                attempts=row.attempts,
-                created_at=_as_utc(row.created_at),
+        return [_dead_letter(row) for row in rows]
+
+
+class DeadLetterRedriveRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, redrive: DeadLetterRedrive) -> None:
+        self._session.add(
+            DeadLetterRedriveORM(
+                id=redrive.id,
+                dead_letter_id=redrive.dead_letter_id,
+                status=redrive.status,
+                error=redrive.error,
+                created_at=redrive.created_at,
             )
-            for row in rows
-        ]
+        )
+        await self._session.flush()
+
+    async def first_success(self, dead_letter_id: str) -> DeadLetterRedrive | None:
+        stmt = (
+            select(DeadLetterRedriveORM)
+            .where(
+                DeadLetterRedriveORM.dead_letter_id == dead_letter_id,
+                DeadLetterRedriveORM.status == "succeeded",
+            )
+            .order_by(DeadLetterRedriveORM.created_at, DeadLetterRedriveORM.id)
+            .limit(1)
+        )
+        row = await self._session.scalar(stmt)
+        return None if row is None else _redrive(row)
+
+    async def for_letters(self, dead_letter_ids: list[str]) -> list[DeadLetterRedrive]:
+        """All attempts for these letters, oldest first: created_at, then id."""
+
+        wanted = sorted(set(dead_letter_ids))
+        found: list[DeadLetterRedrive] = []
+        for start in range(0, len(wanted), _IN_CHUNK):
+            chunk = wanted[start : start + _IN_CHUNK]
+            stmt = select(DeadLetterRedriveORM).where(
+                DeadLetterRedriveORM.dead_letter_id.in_(chunk)
+            )
+            found.extend(_redrive(row) for row in (await self._session.scalars(stmt)).all())
+        return sorted(found, key=lambda item: (item.created_at, item.id))

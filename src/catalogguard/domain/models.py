@@ -150,3 +150,14 @@ class DeadLetter:
     error: str
     attempts: int
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class DeadLetterRedrive:
+    """One operator attempt to rerun a dead letter's handler. Rows are never updated."""
+
+    id: str
+    dead_letter_id: str
+    status: str
+    error: str
+    created_at: datetime

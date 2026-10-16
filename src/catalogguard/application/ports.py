@@ -8,6 +8,7 @@ from catalogguard.domain.events import DomainEvent
 from catalogguard.domain.models import (
     CooldownState,
     DeadLetter,
+    DeadLetterRedrive,
     EmailDraft,
     EmailHandoff,
     EmailSuppression,
@@ -33,6 +34,8 @@ class Metrics(Protocol):
     def email(self, result: str) -> None: ...
 
     def handoff(self, result: str) -> None: ...
+
+    def redrive(self, result: str) -> None: ...
 
     def dead_letter(self, handler: str) -> None: ...
 
@@ -213,9 +216,19 @@ class InteractionRepository(Protocol):
 
 
 class DeadLetterRepository(Protocol):
+    async def get(self, letter_id: str) -> DeadLetter | None: ...
+
     async def add(self, letter: DeadLetter) -> None: ...
 
     async def list(self, *, limit: int, offset: int) -> list[DeadLetter]: ...
+
+
+class DeadLetterRedriveRepository(Protocol):
+    async def add(self, redrive: DeadLetterRedrive) -> None: ...
+
+    async def first_success(self, dead_letter_id: str) -> DeadLetterRedrive | None: ...
+
+    async def for_letters(self, dead_letter_ids: list[str]) -> list[DeadLetterRedrive]: ...
 
 
 class UnitOfWork(Protocol):
@@ -234,6 +247,7 @@ class UnitOfWork(Protocol):
     handoffs: EmailHandoffRepository
     interactions: InteractionRepository
     dead_letters: DeadLetterRepository
+    redrives: DeadLetterRedriveRepository
 
     async def commit(self) -> None: ...
 
@@ -248,3 +262,13 @@ class EventBus(Protocol):
     async def publish(self, event: DomainEvent, outbox: OutboxRepository) -> None: ...
 
     async def drain(self) -> None: ...
+
+
+class EventHandler(Protocol):
+    async def handle(self, event: DomainEvent) -> None: ...
+
+
+class HandlerRegistry(Protocol):
+    """Finds the one subscribed handler instance, so a redrive reuses its wiring."""
+
+    def handler_for(self, event_type: str, name: str) -> EventHandler | None: ...

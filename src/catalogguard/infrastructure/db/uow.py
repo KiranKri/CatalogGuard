@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from catalogguard.infrastructure.db.repositories import (
     CooldownRepository,
+    DeadLetterRedriveRepository,
     DeadLetterRepository,
     EmailDraftRepository,
     EmailHandoffRepository,
@@ -44,6 +45,7 @@ class SqlUnitOfWork:
         self.handoffs = EmailHandoffRepository(session)
         self.interactions = InteractionRepository(session)
         self.dead_letters = DeadLetterRepository(session)
+        self.redrives = DeadLetterRedriveRepository(session)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

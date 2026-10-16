@@ -253,3 +253,25 @@ class DeadLetterORM(Base):
     error: Mapped[str] = mapped_column(Text, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DeadLetterRedriveORM(Base):
+    """Operator redrive attempts. Any succeeded row is the idempotency record for its letter."""
+
+    __tablename__ = "dead_letter_redrives"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('succeeded', 'failed')",
+            name="ck_dead_letter_redrive_status",
+        ),
+        Index("ix_dead_letter_redrives_dead_letter_id", "dead_letter_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dead_letter_id: Mapped[str] = mapped_column(
+        ForeignKey("dead_letters.id", name="fk_dead_letter_redrives_dead_letter_id"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
