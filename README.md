@@ -2,6 +2,30 @@
 
 Product catalog and per-store inventory for a multi-store retailer. When on-hand quantity for a SKU in a store crosses below its effective threshold, CatalogGuard stores a new SEO listing draft and queues a low-stock email draft. It does not change the live listing, and it does not send email. A separate one-shot worker records which queued drafts a downstream mailer may take, with suppressed customers removed.
 
+## At a glance
+
+**This is a portfolio service, not a deployed retailer system.** By default it runs on SQLite with a deterministic stub LLM, so it needs no API key.
+
+What the demo shows:
+
+- A low-stock inventory `PUT` stores a listing draft and a queued email draft. Live product SEO does not change, and no mail is sent.
+- `POST /api/v1/listings/drafts/{id}/publish` copies a ready draft onto the store's live listing.
+- `make handoff` records which queued drafts a mailer may take. It still sends nothing.
+
+To try it, run these from the repository root (PowerShell shown):
+
+1. `uv venv --python 3.12 .venv` (or `python -m venv .venv` with Python 3.12)
+2. `uv pip install --python .venv -e ".[dev]"` (or `.\.venv\Scripts\python -m pip install -e ".[dev]"`)
+3. `make seed`
+4. `make run`
+5. In a second terminal, follow the [curl walkthrough](#curl-walkthrough), then [hand the queued draft to a mailer](#hand-the-queued-draft-to-a-mailer).
+
+The Makefile uses `.venv` when it exists, so activating the venv is optional. Without `make`, run the `python -m …` line from the matching Makefile target.
+
+**Tests:** run `make test` and `make lint`. GitHub Actions runs the same checks on SQLite with the stub LLM.
+
+**Limits:** Docker Compose describes the Postgres layout, but it has not been executed in CI. Two processes against one SQLite file are not supported.
+
 Stack: Python 3.12, FastAPI, SQLAlchemy 2, Pydantic v2, SQLite by default, Postgres in Docker Compose. FastAPI fits this service: the work is an I/O-bound catalog API plus one LLM call, with a small domain that is easier to test outside the framework.
 
 ## Layout
@@ -372,8 +396,12 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 - rolling back to the live version, with a stale version, or to a draft that no longer matches the product
 - the 404 cases
 
-`make lint` runs Ruff.
+`make lint` runs Ruff. `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and `pytest -q` on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets.
 
 ## What this service does not do
 
 Authentication, email delivery, a UI, multi-tenancy beyond the store model, payments, and carts. The email handoff records a decision for a mailer. It does not deliver anything. `RecentInteraction` is seeded. Publishing a draft updates the store listing inside this service. It does not push that copy to an external storefront.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

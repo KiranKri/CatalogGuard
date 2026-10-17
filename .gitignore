@@ -11,3 +11,14 @@ dist/
 build/
 *.egg-info/
 .mypy_cache/
+
+# Internal working notes and AI prompt files. Kept locally, not published.
+DEV_NOTES.md
+PROJECT_BRIEF.md
+catalogguard_review_opus.md
+claude_dev_prompt.md
+claude_dev_prompt_redrive.md
+claude_dev_prompt_reliability.md
+claude_dev_prompt_public.md
+claude_review_prompt.md
+claude_*.md
