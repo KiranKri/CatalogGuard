@@ -14,6 +14,7 @@ from catalogguard.domain.models import Product
 from catalogguard.infrastructure.api.schemas import (
     DeadLetterPage,
     DeadLetterRedriveResponse,
+    DraftCauseResponse,
     EmailDraftPage,
     EmailHandoffPage,
     EmailSuppressionCreate,
@@ -28,6 +29,7 @@ from catalogguard.infrastructure.api.schemas import (
     ListingDraftPage,
     ListingDraftResponse,
     ListingRollback,
+    LowStockPage,
     OutboxSummaryResponse,
     ProductCreate,
     ProductPage,
@@ -43,12 +45,14 @@ from catalogguard.infrastructure.api.schemas import (
 )
 from catalogguard.infrastructure.api.serialize import (
     dead_letter_out,
+    draft_cause_out,
     draft_out,
     email_out,
     handoff_out,
     inventory_change_out,
     inventory_out,
     listing_revision_out,
+    low_stock_out,
     page,
     product_out,
     redrive_out,
@@ -186,6 +190,28 @@ async def list_stores(request: Request) -> dict[str, object]:
 @router.get("/stores/{store_id}", response_model=StoreResponse, tags=["stores"])
 async def get_store(store_id: str, request: Request) -> dict[str, object]:
     return store_out(await _container(request).stores.get(store_id))
+
+
+@router.get(
+    "/stores/{store_id}/low-stock",
+    response_model=LowStockPage,
+    tags=["inventory"],
+    responses={404: {"model": ErrorResponse}},
+)
+async def low_stock_board(
+    store_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    """Rows below their effective threshold, by SKU. Draft ids and statuses only."""
+
+    rows = await _container(request).low_stock.board(
+        store_id=store_id,
+        limit=limit,
+        offset=offset,
+    )
+    return page([low_stock_out(item) for item in rows], limit=limit, offset=offset)
 
 
 @router.put(
@@ -329,6 +355,19 @@ async def publish_listing(
 ) -> dict[str, object]:
     listing = await _container(request).listings.publish(draft_id, body.expected_version)
     return store_listing_out(listing)
+
+
+@router.get(
+    "/listings/drafts/{draft_id}/cause",
+    response_model=DraftCauseResponse,
+    tags=["listings"],
+    responses={404: {"model": ErrorResponse}},
+)
+async def listing_draft_cause(draft_id: str, request: Request) -> dict[str, object]:
+    """The inventory write behind a low-inventory draft. Null when a link is missing."""
+
+    cause = await _container(request).low_stock.draft_cause(draft_id)
+    return draft_cause_out(cause)
 
 
 @router.get(

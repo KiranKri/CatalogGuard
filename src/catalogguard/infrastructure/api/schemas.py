@@ -143,6 +143,32 @@ class InventoryChangePage(BaseModel):
     offset: int
 
 
+class LowStockItem(BaseModel):
+    sku: str
+    store_id: str
+    quantity: int
+    inventory_version: int
+    threshold: int
+    threshold_source: str
+    latest_listing_draft_id: str | None
+    latest_listing_status: str | None
+    latest_email_draft_id: str | None
+    latest_email_status: str | None
+
+
+class LowStockPage(BaseModel):
+    items: list[LowStockItem]
+    limit: int
+    offset: int
+
+
+class DraftCauseResponse(BaseModel):
+    draft_id: str
+    reason: str
+    low_stock_event_id: str | None
+    inventory_change: InventoryChangeResponse | None
+
+
 class ThresholdResponse(BaseModel):
     sku: str
     store_id: str

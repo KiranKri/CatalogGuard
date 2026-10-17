@@ -14,6 +14,7 @@ from catalogguard.application.handlers import (
 )
 from catalogguard.application.inventory import InventoryService
 from catalogguard.application.listing import ListingService
+from catalogguard.application.low_stock import LowStockService
 from catalogguard.application.ports import Clock, LLMProvider, Metrics, UnitOfWorkFactory
 from catalogguard.application.queries import DeadLetterService, OutboxSummaryService
 from catalogguard.application.redrive import DeadLetterRedriveService
@@ -46,6 +47,7 @@ class Container:
     dead_letters: DeadLetterService
     redrives: DeadLetterRedriveService
     outbox: OutboxSummaryService
+    low_stock: LowStockService
 
 
 @dataclass
@@ -190,6 +192,10 @@ def build_runtime(
             clock=clock,
             metrics=metrics,
             claim_timeout_seconds=settings.outbox_claim_timeout_seconds,
+        ),
+        low_stock=LowStockService(
+            uow_factory,
+            default_threshold=settings.default_low_stock_threshold,
         ),
         redrives=DeadLetterRedriveService(
             uow_factory,

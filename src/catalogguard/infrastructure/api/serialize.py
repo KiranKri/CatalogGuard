@@ -1,5 +1,6 @@
 """Domain objects to JSON-ready dicts."""
 
+from catalogguard.application.low_stock import DraftCause, LowStockRow
 from catalogguard.application.queries import DeadLetterView
 from catalogguard.application.redrive import RedriveResult
 from catalogguard.domain.models import (
@@ -67,6 +68,31 @@ def inventory_change_out(change: InventoryChange) -> dict[str, object]:
         "inventory_version": change.inventory_version,
         "event_id": change.event_id,
         "occurred_at": change.occurred_at.isoformat(),
+    }
+
+
+def low_stock_out(row: LowStockRow) -> dict[str, object]:
+    return {
+        "sku": row.sku,
+        "store_id": row.store_id,
+        "quantity": row.quantity,
+        "inventory_version": row.inventory_version,
+        "threshold": row.threshold,
+        "threshold_source": row.threshold_source,
+        "latest_listing_draft_id": row.latest_listing_draft_id,
+        "latest_listing_status": row.latest_listing_status,
+        "latest_email_draft_id": row.latest_email_draft_id,
+        "latest_email_status": row.latest_email_status,
+    }
+
+
+def draft_cause_out(cause: DraftCause) -> dict[str, object]:
+    change = cause.inventory_change
+    return {
+        "draft_id": cause.draft_id,
+        "reason": cause.reason,
+        "low_stock_event_id": cause.low_stock_event_id,
+        "inventory_change": None if change is None else inventory_change_out(change),
     }
 
 

@@ -10,6 +10,7 @@ from catalogguard.application.ports import (
     LEASE_IDLE,
     LEASE_LOST,
     LEASE_RENEWED,
+    LatestDraft,
     OutboxMessage,
     OutboxStats,
 )
@@ -73,6 +74,37 @@ def _copy_list(value: object) -> list:
     if isinstance(value, list):
         return list(value)
     return []
+
+
+# Keeps one IN (...) list well under SQLite's bound-parameter limit.
+_IN_CHUNK = 500
+
+
+async def _latest_by_sku(
+    session: AsyncSession, model: type, store_id: str, skus: list[str]
+) -> dict[str, LatestDraft]:
+    """Newest draft per SKU at one store (created_at, then id). Id and status only."""
+
+    found: dict[str, LatestDraft] = {}
+    wanted = sorted(set(skus))
+    for start in range(0, len(wanted), _IN_CHUNK):
+        chunk = wanted[start : start + _IN_CHUNK]
+        rank = (
+            func.row_number()
+            .over(partition_by=model.sku, order_by=(model.created_at.desc(), model.id.desc()))
+            .label("rank")
+        )
+        ranked = (
+            select(model.sku, model.id, model.status, rank)
+            .where(model.store_id == store_id, model.sku.in_(chunk))
+            .subquery()
+        )
+        rows = await session.execute(
+            select(ranked.c.sku, ranked.c.id, ranked.c.status).where(ranked.c.rank == 1)
+        )
+        for sku, draft_id, status in rows:
+            found[sku] = LatestDraft(id=draft_id, status=status)
+    return found
 
 
 async def _savepoint_add(session: AsyncSession, row: object, error: Exception) -> None:
@@ -204,6 +236,18 @@ class ProductRepository:
             ConflictError(f"Product {product.sku} already exists"),
         )
 
+    async def threshold_overrides(self, skus: list[str]) -> dict[str, int | None]:
+        wanted = sorted(set(skus))
+        found: dict[str, int | None] = {}
+        for start in range(0, len(wanted), _IN_CHUNK):
+            chunk = wanted[start : start + _IN_CHUNK]
+            stmt = select(ProductORM.sku, ProductORM.threshold_override).where(
+                ProductORM.sku.in_(chunk)
+            )
+            for sku, override in await self._session.execute(stmt):
+                found[sku] = override
+        return found
+
     async def list(self, *, limit: int, offset: int) -> list[Product]:
         stmt = select(ProductORM).order_by(ProductORM.sku).limit(limit).offset(offset)
         rows = (await self._session.scalars(stmt)).all()
@@ -309,6 +353,15 @@ class InventoryRepository:
         latest = await self.get(level.sku, level.store_id)
         return latest is not None and latest.version == level.version
 
+    async def for_store(self, store_id: str) -> list[InventoryLevel]:
+        stmt = (
+            select(InventoryLevelORM)
+            .where(InventoryLevelORM.store_id == store_id)
+            .order_by(InventoryLevelORM.sku)
+        )
+        rows = (await self._session.scalars(stmt)).all()
+        return [_inventory(row) for row in rows]
+
     async def list(
         self, *, sku: str | None, store_id: str | None, limit: int, offset: int
     ) -> list[InventoryLevel]:
@@ -363,6 +416,11 @@ class InventoryChangeRepository:
             ),
             ConflictError("An inventory change already exists for this event"),
         )
+
+    async def get_by_event(self, event_id: str) -> InventoryChange | None:
+        stmt = select(InventoryChangeORM).where(InventoryChangeORM.event_id == event_id)
+        row = await self._session.scalar(stmt)
+        return None if row is None else _inventory_change(row)
 
     async def list(
         self, *, sku: str, store_id: str, limit: int, offset: int
@@ -501,6 +559,11 @@ class OutboxRepository:
         )
         return LEASE_RENEWED if result.rowcount else LEASE_IDLE
 
+    async def payload_by_event_id(self, event_id: str) -> dict[str, object] | None:
+        stmt = select(OutboxORM.payload).where(OutboxORM.event_id == event_id)
+        payload = await self._session.scalar(stmt)
+        return None if payload is None else _copy_dict(payload)
+
     async def stats(self, *, claimed_since: datetime) -> OutboxStats:
         pending = OutboxORM.published_at.is_(None)
         unpublished = await self._session.scalar(
@@ -630,6 +693,9 @@ class ListingDraftRepository:
         if row is None:
             raise NotFoundError(f"Listing draft {draft_id} not found")
         row.status = status
+
+    async def latest_for_store(self, store_id: str, skus: list[str]) -> dict[str, LatestDraft]:
+        return await _latest_by_sku(self._session, ListingDraftORM, store_id, skus)
 
     async def list(
         self,
@@ -829,6 +895,10 @@ class EmailDraftRepository:
             ConflictError("Email draft already exists for this event"),
         )
 
+    async def latest_for_store(self, store_id: str, skus: list[str]) -> dict[str, LatestDraft]:
+        # Id and status only: no payload, so no recipients or body are read.
+        return await _latest_by_sku(self._session, EmailDraftORM, store_id, skus)
+
     async def list(
         self,
         *,
@@ -870,10 +940,6 @@ def _handoff(row: EmailHandoffORM) -> EmailHandoff:
         ],
         created_at=_as_utc(row.created_at),
     )
-
-
-# Keeps one IN (...) list well under SQLite's bound-parameter limit.
-_IN_CHUNK = 500
 
 
 class EmailSuppressionRepository:

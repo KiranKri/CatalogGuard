@@ -63,10 +63,20 @@ class LLMProvider(Protocol):
     async def aclose(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class LatestDraft:
+    """Id and status only. Board reads never load draft text or recipients."""
+
+    id: str
+    status: str
+
+
 class ProductRepository(Protocol):
     async def get(self, sku: str) -> Product | None: ...
 
     async def add(self, product: Product) -> None: ...
+
+    async def threshold_overrides(self, skus: list[str]) -> dict[str, int | None]: ...
 
     async def list(self, *, limit: int, offset: int) -> list[Product]: ...
 
@@ -90,6 +100,8 @@ class InventoryRepository(Protocol):
 
     async def compare_and_set(self, *, expected_version: int, level: InventoryLevel) -> bool: ...
 
+    async def for_store(self, store_id: str) -> list[InventoryLevel]: ...
+
     async def list(
         self, *, sku: str | None, store_id: str | None, limit: int, offset: int
     ) -> list[InventoryLevel]: ...
@@ -99,6 +111,8 @@ class InventoryRepository(Protocol):
 
 class InventoryChangeRepository(Protocol):
     async def add(self, change: InventoryChange) -> None: ...
+
+    async def get_by_event(self, event_id: str) -> InventoryChange | None: ...
 
     async def list(
         self, *, sku: str, store_id: str, limit: int, offset: int
@@ -152,6 +166,8 @@ class OutboxRepository(Protocol):
 
     async def stats(self, *, claimed_since: datetime) -> OutboxStats: ...
 
+    async def payload_by_event_id(self, event_id: str) -> dict[str, object] | None: ...
+
 
 class ProcessedEventRepository(Protocol):
     async def seen(self, event_id: str, handler: str) -> bool: ...
@@ -175,6 +191,8 @@ class ListingDraftRepository(Protocol):
     async def add(self, draft: ListingDraft) -> None: ...
 
     async def set_status(self, draft_id: str, status: str) -> None: ...
+
+    async def latest_for_store(self, store_id: str, skus: list[str]) -> dict[str, LatestDraft]: ...
 
     async def list(
         self,
@@ -213,6 +231,8 @@ class EmailDraftRepository(Protocol):
     async def get_by_dedupe(self, dedupe_key: str) -> EmailDraft | None: ...
 
     async def add(self, draft: EmailDraft) -> None: ...
+
+    async def latest_for_store(self, store_id: str, skus: list[str]) -> dict[str, LatestDraft]: ...
 
     async def list(
         self,

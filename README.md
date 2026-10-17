@@ -274,6 +274,8 @@ A suppression added after a draft was already decided does not change that decis
 | PUT | `/api/v1/inventory/{sku}/{store_id}` | Set quantity. Requires `Idempotency-Key` and `expected_version` (`0` creates the row) |
 | GET | `/api/v1/inventory`, `/api/v1/inventory/{sku}/{store_id}` | Read on-hand quantity and version |
 | GET | `/api/v1/inventory/{sku}/{store_id}/changes` | Quantity and threshold history for that pair, newest first. Paginated. 404 for an unknown product or store |
+| GET | `/api/v1/stores/{store_id}/low-stock` | Rows below their effective threshold, by SKU, with the latest listing and email draft ids and statuses. Paginated. 404 for an unknown store |
+| GET | `/api/v1/listings/drafts/{id}/cause` | The inventory write behind a low-inventory draft. `null` for a manual draft or a missing link |
 | GET | `/api/v1/thresholds/{sku}/{store_id}` | Effective threshold and which level supplied it |
 | POST | `/api/v1/listings/{sku}/stores/{store_id}/rewrite` | Manual listing draft. Does not queue email |
 | GET | `/api/v1/listings/drafts` | Listing drafts |
@@ -297,6 +299,11 @@ Inventory conflicts:
 Omit `threshold_override` to leave the current override alone. Send `null` to clear it.
 
 Inventory history (`GET /api/v1/inventory/{sku}/{store_id}/changes`) is append-only. A row is written in the same transaction as the stock row, only when quantity or the threshold override actually changes, and it carries the same `event_id` as that write's `InventoryChanged`. Replays, no-op writes, and rejected writes add nothing. History is not backfilled: changes made before revision `89e567ee29fd`, and seeded stock, have no rows.
+
+**The low-stock board and the cause link.**
+
+- **Board:** `GET /api/v1/stores/{store_id}/low-stock` uses the same `resolve_threshold` as the crossing (store override, then SKU override, then the global default) and lists rows where `quantity < threshold`. That includes sold-out rows whose crossing queued no email. It shows only draft ids and statuses, never recipients or bodies.
+- **Cause:** `GET /api/v1/listings/drafts/{id}/cause` follows a low-inventory draft's `trigger_event_id` to the `LowInventoryDetected` outbox row. That row's `causation_id` points to the `inventory_changes` row with the same `event_id`. If the outbox row or history row is missing, or belongs to another SKU or store, `inventory_change` is `null` instead of an error. A manual draft has no cause.
 
 ## Configuration
 
@@ -406,6 +413,17 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 - newest-first pagination
 - 404s versus an empty page for a pair never stocked
 - no history from the seed
+
+`tests/integration/test_low_stock.py` covers the board and the cause link:
+
+- the strict comparison (quantity equal to the threshold is not low)
+- latest-draft selection and its id tie-break
+- a zero override, and a sold-out row with no email
+- all three threshold sources on seed data, with pagination
+- the 404s and the empty page
+- the cause chain back to the inventory write
+- the manual-draft case
+- missing or mismatched links
 
 `make lint` runs Ruff. `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and `pytest -q` on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets.
 
