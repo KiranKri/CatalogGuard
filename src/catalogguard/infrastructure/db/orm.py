@@ -347,3 +347,15 @@ class DeadLetterRedriveORM(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DeadLetterRedriveClaimORM(Base):
+    """One row while a redrive of that letter is in flight. Committed before the handler runs."""
+
+    __tablename__ = "dead_letter_redrive_claims"
+
+    dead_letter_id: Mapped[str] = mapped_column(
+        ForeignKey("dead_letters.id", name="fk_dead_letter_redrive_claims_dead_letter_id"),
+        primary_key=True,
+    )
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

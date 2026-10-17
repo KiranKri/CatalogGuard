@@ -37,7 +37,7 @@ HANDOFFS = Counter(
 )
 REDRIVES = Counter(
     "catalogguard_dead_letter_redrives_total",
-    "Dead-letter redrive requests by outcome: succeeded, failed, rejected, replayed.",
+    "Dead-letter redrive requests by outcome: succeeded, failed, rejected, replayed, in_progress.",
     ["result"],
     registry=REGISTRY,
 )

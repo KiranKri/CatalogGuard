@@ -310,7 +310,7 @@ Inventory history (`GET /api/v1/inventory/{sku}/{store_id}/changes`) is append-o
 
 ## Configuration
 
-See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline dispatch, threshold 5, cooldown 24 hours, 24 LLM calls per SKU per UTC day, outbox lease 300 seconds renewed every 60 seconds while a drain is alive, three handler attempts, three LLM transport attempts, email handoff batch 50, and handoff max age 72 hours.
+See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline dispatch, threshold 5, cooldown 24 hours, 24 LLM calls per SKU per UTC day, outbox lease 300 seconds renewed every 60 seconds while a drain is alive, redrive claim timeout 300 seconds, three handler attempts, three LLM transport attempts, email handoff batch 50, and handoff max age 72 hours.
 
 `LLM_PROVIDER=openai` without `LLM_API_KEY` or `XAI_API_KEY` fails at startup.
 
@@ -356,8 +356,9 @@ Inline dispatch keeps the request open for the LLM call. That is the right demo 
 - **Listing letters.** A listing redrive goes through the normal daily LLM cap. It spends one call when no draft exists yet for that trigger. It spends nothing, and returns the existing draft, when one does.
 - **Email letters.** A recovered email draft is `queued` like any other, and a sold-out event still queues none. Nothing is sent, and no handoff is recorded until the handoff worker runs.
 - **Refusals.** An `outbox_decode` letter returns 409 `Undecodable outbox rows cannot be redriven`, and the row is not put back on the outbox. A payload that no longer decodes, or a handler name that is not registered, is also 409. None of these refusals records an attempt.
+- **One in flight.** Before the handler runs, the redrive commits a row in `dead_letter_redrive_claims` in its own short transaction. A second request for the same letter, from this process or another, gets 409 `A redrive of this dead letter is already in progress` while that claim is younger than `REDRIVE_CLAIM_TIMEOUT_SECONDS` (default 300). It does not call the handler or record an attempt. A claim that old or older can be taken over with a compare-and-set on `claimed_at`. The success or failure row is written in the same transaction that releases the claim. The remaining hole: a handler that runs longer than the timeout, or a process that dies mid-handler, leaves a claim that a later request takes over, so the handler can run twice and spend a second LLM call. There is no renewal loop. Revision `6e218e07a396` adds the table.
 
-`catalogguard_dead_letter_redrives_total{result}` counts `succeeded`, `failed`, `rejected` (the refusals and unknown ids), and `replayed`. A redrive never increments `catalogguard_dead_letters_total`.
+`catalogguard_dead_letter_redrives_total{result}` counts `succeeded`, `failed`, `rejected` (the refusals and unknown ids), `replayed`, and `in_progress` (a live claim held elsewhere). A redrive never increments `catalogguard_dead_letters_total`.
 
 ```powershell
 curl.exe -s "http://127.0.0.1:8000/api/v1/dead-letters"

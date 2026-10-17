@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from alembic.script import ScriptDirectory
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -160,12 +161,31 @@ def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
         "SELECT sql FROM sqlite_master WHERE name = 'suppressed_crossings'"
     ).fetchone()[0]
     assert "ck_suppressed_crossing_reason" in suppressed_sql
+    assert "dead_letter_redrive_claims" in tables
+    claim_columns = {
+        row[1]: row[5]
+        for row in connection.execute("PRAGMA table_info(dead_letter_redrive_claims)")
+    }
+    assert claim_columns == {"dead_letter_id": 1, "claimed_at": 0}
+    claim_keys = list(connection.execute("PRAGMA foreign_key_list(dead_letter_redrive_claims)"))
+    assert [(row[2], row[3], row[4]) for row in claim_keys] == [
+        ("dead_letters", "dead_letter_id", "id")
+    ]
+    connection.execute(
+        "INSERT INTO dead_letter_redrives VALUES ('r1', 'letter', 'succeeded', '', '2026-06-01')"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="ck_dead_letter_redrive_status"):
+        connection.execute(
+            "INSERT INTO dead_letter_redrives VALUES ('r2', 'letter', 'started', '', '2026-06-01')"
+        )
+    connection.rollback()
     version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert version == ("b19fd5f52b4b",)
+    assert version == ("6e218e07a396",)
     connection.close()
 
     scripts = ScriptDirectory(str(_ROOT / "migrations"))
-    assert scripts.get_current_head() == "b19fd5f52b4b"
+    assert scripts.get_current_head() == "6e218e07a396"
+    assert scripts.get_revision("6e218e07a396").down_revision == "b19fd5f52b4b"
     assert scripts.get_revision("b19fd5f52b4b").down_revision == "89e567ee29fd"
     assert scripts.get_revision("89e567ee29fd").down_revision == "5751f906cab6"
     assert scripts.get_revision("5751f906cab6").down_revision == "c81f0f63dcdc"

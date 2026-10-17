@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     retry_backoff_seconds: float = 0.2
     outbox_claim_timeout_seconds: int = 300
     outbox_lease_renew_seconds: int = 60
+    redrive_claim_timeout_seconds: int = 300
     event_dispatch: str = "inline"
     log_level: str = "INFO"
     seed_on_startup: bool = False

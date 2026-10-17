@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from catalogguard.domain.models import (
 from catalogguard.infrastructure.db.orm import (
     CooldownORM,
     DeadLetterORM,
+    DeadLetterRedriveClaimORM,
     DeadLetterRedriveORM,
     EmailDraftORM,
     EmailHandoffORM,
@@ -1214,3 +1215,49 @@ class DeadLetterRedriveRepository:
             )
             found.extend(_redrive(row) for row in (await self._session.scalars(stmt)).all())
         return sorted(found, key=lambda item: (item.created_at, item.id))
+
+
+class DeadLetterRedriveClaimRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, dead_letter_id: str, claimed_at: datetime) -> bool:
+        """Insert a claim. False when the letter already has one."""
+
+        try:
+            async with self._session.begin_nested():
+                self._session.add(
+                    DeadLetterRedriveClaimORM(dead_letter_id=dead_letter_id, claimed_at=claimed_at)
+                )
+                await self._session.flush()
+        except IntegrityError:
+            return False
+        return True
+
+    async def claimed_at(self, dead_letter_id: str) -> datetime | None:
+        stmt = select(DeadLetterRedriveClaimORM.claimed_at).where(
+            DeadLetterRedriveClaimORM.dead_letter_id == dead_letter_id
+        )
+        value = await self._session.scalar(stmt)
+        return None if value is None else _as_utc(value)
+
+    async def take_over(self, dead_letter_id: str, *, expected: datetime, now: datetime) -> bool:
+        stmt = (
+            update(DeadLetterRedriveClaimORM)
+            .where(
+                DeadLetterRedriveClaimORM.dead_letter_id == dead_letter_id,
+                DeadLetterRedriveClaimORM.claimed_at == expected,
+            )
+            .values(claimed_at=now)
+        )
+        result = await self._session.execute(stmt)
+        return result.rowcount == 1
+
+    async def release(self, dead_letter_id: str, claimed_at: datetime) -> None:
+        """Delete the claim only while it is still the one taken at claimed_at."""
+
+        stmt = delete(DeadLetterRedriveClaimORM).where(
+            DeadLetterRedriveClaimORM.dead_letter_id == dead_letter_id,
+            DeadLetterRedriveClaimORM.claimed_at == claimed_at,
+        )
+        await self._session.execute(stmt)

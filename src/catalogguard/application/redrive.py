@@ -11,12 +11,21 @@ A `failed` row does not block another attempt. Handlers are already safe to
 run again for the same event id, so a redrive reuses their own idempotency
 (processed_events, the listing trigger id, and the email dedupe key) and the
 same daily LLM cap path.
+
+Before the handler runs, the attempt commits a row in dead_letter_redrive_claims
+in its own short transaction. That row is what another process sees: while it
+is younger than the claim timeout, a second request gets 409 and the handler is
+not called. An older claim is taken over with a compare-and-set on claimed_at.
+The success or failure row is written in the same transaction that releases the
+claim. A process that dies mid-handler leaves its claim until the timeout, so
+the handler can still run twice in that case. There is no renewal loop.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -38,6 +47,7 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 REJECTED = "rejected"
 REPLAYED = "replayed"
+IN_PROGRESS = "in_progress"
 _ERROR_LIMIT = 2000
 
 
@@ -60,6 +70,7 @@ class DeadLetterRedriveService:
         decode_event: Callable[[dict[str, object]], DomainEvent],
         metrics: Metrics,
         clock: Clock,
+        claim_timeout_seconds: int,
     ) -> None:
         self._uow_factory = uow_factory
         self._handlers = handlers
@@ -67,6 +78,7 @@ class DeadLetterRedriveService:
         self._decode_event = decode_event
         self._metrics = metrics
         self._clock = clock
+        self._claim_timeout = timedelta(seconds=claim_timeout_seconds)
         # One lock per letter id in this process, so a double click waits and then
         # replays instead of running the handler twice. Entries vanish when unused.
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -114,16 +126,21 @@ class DeadLetterRedriveService:
                 f"No handler named {letter.handler} is registered for {letter.event_type}"
             )
 
+        claimed_at = await self._claim(letter.id)
+        if claimed_at is None:
+            self._outcome(dead_letter_id, letter, IN_PROGRESS)
+            raise ConflictError("A redrive of this dead letter is already in progress")
+
         try:
             await handler.handle(event)
         except Exception as exc:
             # CostLimitError, NotFoundError, MalformedLLMOutputError, and anything
             # else: record the attempt, then let the existing HTTP mapping answer.
             message = str(exc) or exc.__class__.__name__
-            await self._record(letter.id, FAILED, message[:_ERROR_LIMIT])
+            await self._record(letter.id, FAILED, message[:_ERROR_LIMIT], claimed_at)
             self._outcome(dead_letter_id, letter, FAILED)
             raise
-        redrive = await self._record(letter.id, SUCCEEDED, "")
+        redrive = await self._record(letter.id, SUCCEEDED, "", claimed_at)
         self._outcome(dead_letter_id, letter, SUCCEEDED)
         await self._drain_quietly()
         return RedriveResult(
@@ -134,7 +151,27 @@ class DeadLetterRedriveService:
             redrive_id=redrive.id,
         )
 
-    async def _record(self, dead_letter_id: str, status: str, error: str) -> DeadLetterRedrive:
+    async def _claim(self, dead_letter_id: str) -> datetime | None:
+        """Commit a claim and return its claimed_at, or None when another one is live."""
+
+        now = self._clock.now()
+        async with self._uow_factory() as uow:
+            if not await uow.redrive_claims.add(dead_letter_id, now):
+                held_since = await uow.redrive_claims.claimed_at(dead_letter_id)
+                # A claim that vanished between the insert and this read was just
+                # released by its owner; treat it as still busy rather than guess.
+                if held_since is None or now - held_since < self._claim_timeout:
+                    return None
+                if not await uow.redrive_claims.take_over(
+                    dead_letter_id, expected=held_since, now=now
+                ):
+                    return None
+            await uow.commit()
+        return now
+
+    async def _record(
+        self, dead_letter_id: str, status: str, error: str, claimed_at: datetime
+    ) -> DeadLetterRedrive:
         redrive = DeadLetterRedrive(
             id=str(uuid4()),
             dead_letter_id=dead_letter_id,
@@ -144,6 +181,9 @@ class DeadLetterRedriveService:
         )
         async with self._uow_factory() as uow:
             await uow.redrives.add(redrive)
+            # Only our own claim. If it timed out and was taken over, the new owner
+            # still holds it and releases it when its own attempt finishes.
+            await uow.redrive_claims.release(dead_letter_id, claimed_at)
             await uow.commit()
         return redrive
 

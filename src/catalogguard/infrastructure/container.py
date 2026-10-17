@@ -114,6 +114,11 @@ def build_runtime(
             f"OUTBOX_CLAIM_TIMEOUT_SECONDS (got {settings.outbox_lease_renew_seconds} "
             f"and {settings.outbox_claim_timeout_seconds})"
         )
+    if settings.redrive_claim_timeout_seconds <= 0:
+        raise RuntimeError(
+            "REDRIVE_CLAIM_TIMEOUT_SECONDS must be greater than 0 "
+            f"(got {settings.redrive_claim_timeout_seconds})"
+        )
     prompts_path = settings.prompts_path()
     if not prompts_path.is_dir():
         raise RuntimeError(f"Prompts directory not found: {prompts_path}")
@@ -204,6 +209,7 @@ def build_runtime(
             decode_event=load_event,
             metrics=metrics,
             clock=clock,
+            claim_timeout_seconds=settings.redrive_claim_timeout_seconds,
         ),
     )
     return Runtime(

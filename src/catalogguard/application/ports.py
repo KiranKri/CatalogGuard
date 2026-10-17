@@ -302,6 +302,18 @@ class DeadLetterRedriveRepository(Protocol):
     async def for_letters(self, dead_letter_ids: list[str]) -> list[DeadLetterRedrive]: ...
 
 
+class DeadLetterRedriveClaimRepository(Protocol):
+    async def add(self, dead_letter_id: str, claimed_at: datetime) -> bool: ...
+
+    async def claimed_at(self, dead_letter_id: str) -> datetime | None: ...
+
+    async def take_over(self, dead_letter_id: str, *, expected: datetime, now: datetime) -> bool:
+        """Move claimed_at to now only if it still equals expected."""
+        ...
+
+    async def release(self, dead_letter_id: str, claimed_at: datetime) -> None: ...
+
+
 class UnitOfWork(Protocol):
     products: ProductRepository
     stores: StoreRepository
@@ -322,6 +334,7 @@ class UnitOfWork(Protocol):
     interactions: InteractionRepository
     dead_letters: DeadLetterRepository
     redrives: DeadLetterRedriveRepository
+    redrive_claims: DeadLetterRedriveClaimRepository
 
     async def commit(self) -> None: ...
 
