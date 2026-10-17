@@ -129,12 +129,44 @@ def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
         and [col[2] for col in connection.execute(f"PRAGMA index_info('{name}')")] == ["event_id"]
         for name, unique in change_indexes.items()
     )
+    assert "suppressed_crossings" in tables
+    suppressed_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(suppressed_crossings)")
+    }
+    assert suppressed_columns == {
+        "id",
+        "sku",
+        "store_id",
+        "inventory_event_id",
+        "occurred_at",
+        "previous_quantity",
+        "new_quantity",
+        "threshold",
+        "threshold_source",
+        "cooldown_until",
+        "reason",
+    }
+    suppressed_indexes = {
+        row[1]: row[2] for row in connection.execute("PRAGMA index_list(suppressed_crossings)")
+    }
+    assert suppressed_indexes.get("ix_suppressed_crossings_sku_store_occurred") == 0
+    assert any(
+        unique
+        and [col[2] for col in connection.execute(f"PRAGMA index_info('{name}')")]
+        == ["inventory_event_id"]
+        for name, unique in suppressed_indexes.items()
+    )
+    suppressed_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'suppressed_crossings'"
+    ).fetchone()[0]
+    assert "ck_suppressed_crossing_reason" in suppressed_sql
     version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert version == ("89e567ee29fd",)
+    assert version == ("b19fd5f52b4b",)
     connection.close()
 
     scripts = ScriptDirectory(str(_ROOT / "migrations"))
-    assert scripts.get_current_head() == "89e567ee29fd"
+    assert scripts.get_current_head() == "b19fd5f52b4b"
+    assert scripts.get_revision("b19fd5f52b4b").down_revision == "89e567ee29fd"
     assert scripts.get_revision("89e567ee29fd").down_revision == "5751f906cab6"
     assert scripts.get_revision("5751f906cab6").down_revision == "c81f0f63dcdc"
     assert scripts.get_revision("c81f0f63dcdc").down_revision == "15e685dc71f6"

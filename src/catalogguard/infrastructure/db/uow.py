@@ -21,6 +21,7 @@ from catalogguard.infrastructure.db.repositories import (
     StoreListingRepository,
     StoreListingRevisionRepository,
     StoreRepository,
+    SuppressedCrossingRepository,
 )
 
 
@@ -40,6 +41,7 @@ class SqlUnitOfWork:
         self.outbox = OutboxRepository(session)
         self.processed = ProcessedEventRepository(session)
         self.cooldowns = CooldownRepository(session)
+        self.suppressed_crossings = SuppressedCrossingRepository(session)
         self.drafts = ListingDraftRepository(session)
         self.live_listings = StoreListingRepository(session)
         self.listing_revisions = StoreListingRevisionRepository(session)

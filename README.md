@@ -108,6 +108,8 @@ A low-stock event fires only on a downward crossing: previous quantity was at or
 
 Trade-off: a real restock-and-sellout inside the window is silent, and a crossing during the window is gone even if the item stays low. That stops a flapping count (5 → 4 → 6 → 4) from calling the model and queueing mail on every wobble. The manual rewrite endpoint is the operator path. Cooldown is judged from the event timestamp, so a redelivered inventory event does not extend the window or fire twice.
 
+A crossing inside the window is stored in `suppressed_crossings` with `reason=cooldown`, the quantities, the effective threshold and its source, and `cooldown_until`. `GET /api/v1/suppressed-crossings?store_id=…` lists them, newest first. A stored suppression is not retried when the window ends, and the cooldown clock does not move. A move that stays below the threshold, a first insert, and a crossing at the exact end of the window are not suppressions. Rows start with revision `b19fd5f52b4b`; earlier suppressions were only log lines.
+
 ### Email targeting
 
 This is a deliberate simplification. `RecentInteraction` stores `customer_id`, `sku`, `store_id`, `interaction_type` (`view` or `add_to_cart`), and `timestamp`. The handler loads rows for that SKU and store in the lookback window (`EMAIL_LOOKBACK_HOURS`, default 168), keeps one row per customer, and prefers `add_to_cart` over `view`. The payload carries opaque customer ids. This service does not resolve names or email addresses.
@@ -276,6 +278,7 @@ A suppression added after a draft was already decided does not change that decis
 | GET | `/api/v1/inventory/{sku}/{store_id}/changes` | Quantity and threshold history for that pair, newest first. Paginated. 404 for an unknown product or store |
 | GET | `/api/v1/stores/{store_id}/low-stock` | Rows below their effective threshold, by SKU, with the latest listing and email draft ids and statuses. Paginated. 404 for an unknown store |
 | GET | `/api/v1/listings/drafts/{id}/cause` | The inventory write behind a low-inventory draft. `null` for a manual draft or a missing link |
+| GET | `/api/v1/suppressed-crossings` | Crossings dropped inside the cooldown, newest first. `store_id` required (404 if unknown), optional `sku`, paginated. No POST or delete |
 | GET | `/api/v1/thresholds/{sku}/{store_id}` | Effective threshold and which level supplied it |
 | POST | `/api/v1/listings/{sku}/stores/{store_id}/rewrite` | Manual listing draft. Does not queue email |
 | GET | `/api/v1/listings/drafts` | Listing drafts |
@@ -341,7 +344,7 @@ Inline dispatch keeps the request open for the LLM call. That is the right demo 
 
 **Idempotency.** The inventory write, the idempotency record, and the `InventoryChanged` outbox row commit in one transaction. A client retry with the same key returns the stored response and does not apply the write again. If the process dies after that commit and before the drain, the next request's drain (and the drain on startup) delivers the unpublished row. Handlers are safe to run again: threshold evaluation records `processed_events` in the same transaction as the downstream outbox row, listing drafts are unique on `trigger_event_id`, and email drafts are unique on `dedupe_key`.
 
-**Failure modes.** A listing or email failure does not roll back the stock count. Malformed model output is retried, then written to `dead_letters`. A validation failure is deterministic, so it is stored on the draft and not retried. The email handler still runs if the listing handler fails. A crossing inside the cooldown is discarded. Permanent LLM errors (for example HTTP 400) are not retried inside the provider. Transport errors and HTTP 429/5xx are.
+**Failure modes.** A listing or email failure does not roll back the stock count. Malformed model output is retried, then written to `dead_letters`. A validation failure is deterministic, so it is stored on the draft and not retried. The email handler still runs if the listing handler fails. A crossing inside the cooldown does not fire; it is recorded in `suppressed_crossings`. Permanent LLM errors (for example HTTP 400) are not retried inside the provider. Transport errors and HTTP 429/5xx are.
 
 **Recovering a dead letter.** `POST /api/v1/dead-letters/{id}/redrive` takes no body and runs only that letter's handler (`threshold_evaluation`, `listing_rewrite`, or `email_draft`) once, on the event stored with the letter.
 
@@ -424,6 +427,14 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 - the cause chain back to the inventory write
 - the manual-draft case
 - missing or mismatched links
+
+`tests/integration/test_suppressed_crossings.py` covers cooldown suppressions:
+
+- a crossing inside the window stored with its quantities, threshold, and `cooldown_until`, with no new draft and the cooldown unchanged
+- a crossing at the exact end of the window that fires and is not stored
+- no row for a move that stays low or for a first insert
+- a redelivered event, and the unique `inventory_event_id` backstop
+- the store and SKU filters, ordering, pagination, and the 404
 
 `make lint` runs Ruff. `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and `pytest -q` on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets.
 

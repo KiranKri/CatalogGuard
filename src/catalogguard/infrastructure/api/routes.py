@@ -41,6 +41,7 @@ from catalogguard.infrastructure.api.schemas import (
     StoreListingRevisionPage,
     StorePage,
     StoreResponse,
+    SuppressedCrossingPage,
     ThresholdResponse,
 )
 from catalogguard.infrastructure.api.serialize import (
@@ -58,6 +59,7 @@ from catalogguard.infrastructure.api.serialize import (
     redrive_out,
     store_listing_out,
     store_out,
+    suppressed_crossing_out,
     suppression_out,
 )
 from catalogguard.infrastructure.container import Container
@@ -212,6 +214,30 @@ async def low_stock_board(
         offset=offset,
     )
     return page([low_stock_out(item) for item in rows], limit=limit, offset=offset)
+
+
+@router.get(
+    "/suppressed-crossings",
+    response_model=SuppressedCrossingPage,
+    tags=["inventory"],
+    responses={404: {"model": ErrorResponse}},
+)
+async def list_suppressed_crossings(
+    request: Request,
+    store_id: str,
+    sku: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    """Crossings dropped inside the cooldown, newest first. 404 only for an unknown store."""
+
+    rows = await _container(request).low_stock.suppressed_crossings(
+        store_id=store_id,
+        sku=sku,
+        limit=limit,
+        offset=offset,
+    )
+    return page([suppressed_crossing_out(item) for item in rows], limit=limit, offset=offset)
 
 
 @router.put(

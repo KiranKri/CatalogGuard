@@ -162,6 +162,26 @@ class LowStockPage(BaseModel):
     offset: int
 
 
+class SuppressedCrossingResponse(BaseModel):
+    id: str
+    sku: str
+    store_id: str
+    inventory_event_id: str
+    occurred_at: str
+    previous_quantity: int
+    new_quantity: int
+    threshold: int
+    threshold_source: str
+    cooldown_until: str
+    reason: str
+
+
+class SuppressedCrossingPage(BaseModel):
+    items: list[SuppressedCrossingResponse]
+    limit: int
+    offset: int
+
+
 class DraftCauseResponse(BaseModel):
     draft_id: str
     reason: str

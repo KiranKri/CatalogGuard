@@ -153,6 +153,23 @@ class CooldownState:
 
 
 @dataclass(frozen=True)
+class SuppressedCrossing:
+    """A downward crossing dropped because the (SKU, store) cooldown was active."""
+
+    id: str
+    sku: str
+    store_id: str
+    inventory_event_id: str
+    occurred_at: datetime
+    previous_quantity: int
+    new_quantity: int
+    threshold: int
+    threshold_source: str
+    cooldown_until: datetime
+    reason: str
+
+
+@dataclass(frozen=True)
 class EmailSuppression:
     """An opaque customer id that must not appear on a mailer handoff."""
 

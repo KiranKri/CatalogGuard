@@ -1,4 +1,5 @@
-"""Read-only low-stock views: what is low in a store, and why a draft exists.
+"""Read-only low-stock views: what is low in a store, why a draft exists, and
+which crossings the cooldown dropped.
 
 The board resolves each row with the same `resolve_threshold` the crossing
 handler uses (store override, else SKU override, else the global default) and
@@ -9,13 +10,16 @@ A low-inventory draft's trigger is the LowInventoryDetected event id. Its
 outbox payload carries `causation_id`, the InventoryChanged event id, which is
 also the `event_id` on the inventory_changes row that write recorded. A missing
 or mismatched link gives a null change, never an error.
+
+A crossing inside the cooldown is written to suppressed_crossings by the
+threshold handler. Listing them is per store; an unknown SKU is an empty page.
 """
 
 from dataclasses import dataclass
 
 from catalogguard.application.ports import UnitOfWorkFactory
 from catalogguard.domain.errors import NotFoundError
-from catalogguard.domain.models import InventoryChange
+from catalogguard.domain.models import InventoryChange, SuppressedCrossing
 from catalogguard.domain.threshold import resolve_threshold
 
 LOW_INVENTORY = "low_inventory"
@@ -87,6 +91,19 @@ class LowStockService:
                 )
             )
         return rows
+
+    async def suppressed_crossings(
+        self, *, store_id: str, sku: str | None, limit: int, offset: int
+    ) -> list[SuppressedCrossing]:
+        async with self._uow_factory() as uow:
+            if await uow.stores.get(store_id) is None:
+                raise NotFoundError(f"Store {store_id} not found")
+            return await uow.suppressed_crossings.list(
+                store_id=store_id,
+                sku=sku,
+                limit=limit,
+                offset=offset,
+            )
 
     async def draft_cause(self, draft_id: str) -> DraftCause:
         async with self._uow_factory() as uow:

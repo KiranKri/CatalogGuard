@@ -32,6 +32,7 @@ from catalogguard.domain.models import (
     Store,
     StoreListing,
     StoreListingRevision,
+    SuppressedCrossing,
 )
 from catalogguard.infrastructure.db.orm import (
     CooldownORM,
@@ -52,6 +53,7 @@ from catalogguard.infrastructure.db.orm import (
     StoreListingORM,
     StoreListingRevisionORM,
     StoreORM,
+    SuppressedCrossingORM,
 )
 from catalogguard.infrastructure.events.serialize import dump_event
 
@@ -638,6 +640,60 @@ class CooldownRepository:
             return
         row.last_triggered_at = state.last_triggered_at
         row.last_event_id = state.last_event_id
+
+
+def _suppressed_crossing(row: SuppressedCrossingORM) -> SuppressedCrossing:
+    return SuppressedCrossing(
+        id=row.id,
+        sku=row.sku,
+        store_id=row.store_id,
+        inventory_event_id=row.inventory_event_id,
+        occurred_at=_as_utc(row.occurred_at),
+        previous_quantity=row.previous_quantity,
+        new_quantity=row.new_quantity,
+        threshold=row.threshold,
+        threshold_source=row.threshold_source,
+        cooldown_until=_as_utc(row.cooldown_until),
+        reason=row.reason,
+    )
+
+
+class SuppressedCrossingRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, crossing: SuppressedCrossing) -> None:
+        await _savepoint_add(
+            self._session,
+            SuppressedCrossingORM(
+                id=crossing.id,
+                sku=crossing.sku,
+                store_id=crossing.store_id,
+                inventory_event_id=crossing.inventory_event_id,
+                occurred_at=crossing.occurred_at,
+                previous_quantity=crossing.previous_quantity,
+                new_quantity=crossing.new_quantity,
+                threshold=crossing.threshold,
+                threshold_source=crossing.threshold_source,
+                cooldown_until=crossing.cooldown_until,
+                reason=crossing.reason,
+            ),
+            ConflictError("A suppressed crossing already exists for this inventory event"),
+        )
+
+    async def list(
+        self, *, store_id: str, sku: str | None, limit: int, offset: int
+    ) -> list[SuppressedCrossing]:
+        stmt = select(SuppressedCrossingORM).where(SuppressedCrossingORM.store_id == store_id)
+        if sku is not None:
+            stmt = stmt.where(SuppressedCrossingORM.sku == sku)
+        stmt = (
+            stmt.order_by(SuppressedCrossingORM.occurred_at.desc(), SuppressedCrossingORM.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.scalars(stmt)).all()
+        return [_suppressed_crossing(row) for row in rows]
 
 
 class ListingDraftRepository:

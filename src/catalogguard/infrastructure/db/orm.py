@@ -291,6 +291,29 @@ class CooldownORM(Base):
     last_event_id: Mapped[str] = mapped_column(String(36), nullable=False)
 
 
+class SuppressedCrossingORM(Base):
+    """A crossing dropped inside the cooldown. One row per InventoryChanged event at most."""
+
+    __tablename__ = "suppressed_crossings"
+    __table_args__ = (
+        UniqueConstraint("inventory_event_id", name="uq_suppressed_crossings_inventory_event_id"),
+        CheckConstraint("reason in ('cooldown')", name="ck_suppressed_crossing_reason"),
+        Index("ix_suppressed_crossings_sku_store_occurred", "sku", "store_id", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    sku: Mapped[str] = mapped_column(String(64), nullable=False)
+    store_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    inventory_event_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    previous_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    new_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold_source: Mapped[str] = mapped_column(String(32), nullable=False)
+    cooldown_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 class DeadLetterORM(Base):
     __tablename__ = "dead_letters"
 

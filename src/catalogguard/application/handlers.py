@@ -10,7 +10,7 @@ from catalogguard.application.listing import ListingService
 from catalogguard.application.ports import EventBus, UnitOfWorkFactory
 from catalogguard.domain.crossing import is_cooldown_active, is_downward_crossing
 from catalogguard.domain.events import InventoryChanged, LowInventoryDetected
-from catalogguard.domain.models import CooldownState
+from catalogguard.domain.models import CooldownState, SuppressedCrossing
 from catalogguard.domain.threshold import resolve_threshold
 
 log = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ class ThresholdHandler:
     """InventoryChanged → maybe LowInventoryDetected.
 
     A crossing that lands inside the cooldown is dropped. It is not deferred.
+    The drop is recorded in suppressed_crossings so an operator can list it.
     See catalogguard.domain.crossing for the trade-off.
     """
 
@@ -100,6 +101,24 @@ class ThresholdHandler:
                     decision.source,
                 )
             elif crossed:
+                # cooling is true here, so the cooldown row exists. A duplicate
+                # inventory event id raises and rolls the whole transaction back.
+                assert cooldown is not None
+                await uow.suppressed_crossings.add(
+                    SuppressedCrossing(
+                        id=str(uuid.uuid4()),
+                        sku=event.sku,
+                        store_id=event.store_id,
+                        inventory_event_id=event.event_id,
+                        occurred_at=event.occurred_at,
+                        previous_quantity=event.previous_quantity,
+                        new_quantity=event.new_quantity,
+                        threshold=decision.value,
+                        threshold_source=decision.source,
+                        cooldown_until=cooldown.last_triggered_at + self._cooldown,
+                        reason="cooldown",
+                    )
+                )
                 log.info(
                     "low_inventory_suppressed sku=%s store=%s reason=cooldown",
                     event.sku,

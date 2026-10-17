@@ -14,6 +14,7 @@ from catalogguard.domain.models import (
     Store,
     StoreListing,
     StoreListingRevision,
+    SuppressedCrossing,
 )
 
 
@@ -83,6 +84,22 @@ def low_stock_out(row: LowStockRow) -> dict[str, object]:
         "latest_listing_status": row.latest_listing_status,
         "latest_email_draft_id": row.latest_email_draft_id,
         "latest_email_status": row.latest_email_status,
+    }
+
+
+def suppressed_crossing_out(crossing: SuppressedCrossing) -> dict[str, object]:
+    return {
+        "id": crossing.id,
+        "sku": crossing.sku,
+        "store_id": crossing.store_id,
+        "inventory_event_id": crossing.inventory_event_id,
+        "occurred_at": crossing.occurred_at.isoformat(),
+        "previous_quantity": crossing.previous_quantity,
+        "new_quantity": crossing.new_quantity,
+        "threshold": crossing.threshold,
+        "threshold_source": crossing.threshold_source,
+        "cooldown_until": crossing.cooldown_until.isoformat(),
+        "reason": crossing.reason,
     }
 
 

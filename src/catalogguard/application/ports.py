@@ -21,6 +21,7 @@ from catalogguard.domain.models import (
     Store,
     StoreListing,
     StoreListingRevision,
+    SuppressedCrossing,
 )
 
 
@@ -181,6 +182,14 @@ class CooldownRepository(Protocol):
     async def upsert(self, state: CooldownState) -> None: ...
 
 
+class SuppressedCrossingRepository(Protocol):
+    async def add(self, crossing: SuppressedCrossing) -> None: ...
+
+    async def list(
+        self, *, store_id: str, sku: str | None, limit: int, offset: int
+    ) -> list[SuppressedCrossing]: ...
+
+
 class ListingDraftRepository(Protocol):
     async def get(self, draft_id: str) -> ListingDraft | None: ...
 
@@ -302,6 +311,7 @@ class UnitOfWork(Protocol):
     outbox: OutboxRepository
     processed: ProcessedEventRepository
     cooldowns: CooldownRepository
+    suppressed_crossings: SuppressedCrossingRepository
     drafts: ListingDraftRepository
     live_listings: StoreListingRepository
     listing_revisions: StoreListingRevisionRepository
