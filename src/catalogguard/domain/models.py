@@ -41,6 +41,22 @@ class InventoryLevel:
 
 
 @dataclass(frozen=True)
+class InventoryChange:
+    """Append-only record of one inventory write that changed quantity or threshold."""
+
+    id: str
+    sku: str
+    store_id: str
+    previous_quantity: int | None
+    new_quantity: int
+    previous_threshold_override: int | None
+    new_threshold_override: int | None
+    inventory_version: int
+    event_id: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
 class ListingDraft:
     id: str
     sku: str

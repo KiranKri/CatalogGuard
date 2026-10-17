@@ -68,6 +68,27 @@ class InventoryLevelORM(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class InventoryChangeORM(Base):
+    """Append-only history of inventory writes, one row per InventoryChanged event."""
+
+    __tablename__ = "inventory_changes"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_inventory_changes_event_id"),
+        Index("ix_inventory_changes_sku_store_occurred", "sku", "store_id", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    sku: Mapped[str] = mapped_column(String(64), nullable=False)
+    store_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    previous_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    previous_threshold_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_threshold_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    inventory_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ListingDraftORM(Base):
     __tablename__ = "listing_drafts"
     __table_args__ = (

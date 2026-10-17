@@ -106,11 +106,35 @@ def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
     assert [(row[2], row[3], row[4]) for row in revision_keys] == [
         ("listing_drafts", "published_draft_id", "id")
     ]
+    assert "inventory_changes" in tables
+    change_columns = {row[1] for row in connection.execute("PRAGMA table_info(inventory_changes)")}
+    assert change_columns == {
+        "id",
+        "sku",
+        "store_id",
+        "previous_quantity",
+        "new_quantity",
+        "previous_threshold_override",
+        "new_threshold_override",
+        "inventory_version",
+        "event_id",
+        "occurred_at",
+    }
+    change_indexes = {
+        row[1]: row[2] for row in connection.execute("PRAGMA index_list(inventory_changes)")
+    }
+    assert change_indexes.get("ix_inventory_changes_sku_store_occurred") == 0
+    assert any(
+        unique
+        and [col[2] for col in connection.execute(f"PRAGMA index_info('{name}')")] == ["event_id"]
+        for name, unique in change_indexes.items()
+    )
     version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert version == ("5751f906cab6",)
+    assert version == ("89e567ee29fd",)
     connection.close()
 
     scripts = ScriptDirectory(str(_ROOT / "migrations"))
-    assert scripts.get_current_head() == "5751f906cab6"
+    assert scripts.get_current_head() == "89e567ee29fd"
+    assert scripts.get_revision("89e567ee29fd").down_revision == "5751f906cab6"
     assert scripts.get_revision("5751f906cab6").down_revision == "c81f0f63dcdc"
     assert scripts.get_revision("c81f0f63dcdc").down_revision == "15e685dc71f6"

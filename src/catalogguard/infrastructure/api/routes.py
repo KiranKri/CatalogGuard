@@ -20,6 +20,7 @@ from catalogguard.infrastructure.api.schemas import (
     EmailSuppressionPage,
     EmailSuppressionResponse,
     ErrorResponse,
+    InventoryChangePage,
     InventoryPage,
     InventoryResponse,
     InventoryUpdateResponse,
@@ -45,6 +46,7 @@ from catalogguard.infrastructure.api.serialize import (
     draft_out,
     email_out,
     handoff_out,
+    inventory_change_out,
     inventory_out,
     listing_revision_out,
     page,
@@ -231,6 +233,30 @@ async def upsert_inventory(
 )
 async def get_inventory(sku: str, store_id: str, request: Request) -> dict[str, object]:
     return inventory_out(await _container(request).inventory.get(sku, store_id))
+
+
+@router.get(
+    "/inventory/{sku}/{store_id}/changes",
+    response_model=InventoryChangePage,
+    tags=["inventory"],
+    responses={404: {"model": ErrorResponse}},
+)
+async def list_inventory_changes(
+    sku: str,
+    store_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    """Append-only history of writes that changed quantity or threshold. Newest first."""
+
+    rows = await _container(request).inventory.changes(
+        sku=sku,
+        store_id=store_id,
+        limit=limit,
+        offset=offset,
+    )
+    return page([inventory_change_out(item) for item in rows], limit=limit, offset=offset)
 
 
 @router.get("/inventory", response_model=InventoryPage, tags=["inventory"])

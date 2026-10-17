@@ -12,7 +12,7 @@ from catalogguard.domain.errors import (
     OptimisticConflictError,
 )
 from catalogguard.domain.events import InventoryChanged
-from catalogguard.domain.models import IdempotencyRecord, InventoryLevel
+from catalogguard.domain.models import IdempotencyRecord, InventoryChange, InventoryLevel
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ class InventoryService:
 
         current = await uow.inventory.get(cmd.sku, cmd.store_id)
         now = self._clock.now()
+        previous_override = None if current is None else current.threshold_override
         if current is None:
             if cmd.expected_version != 0:
                 raise OptimisticConflictError(
@@ -176,6 +177,21 @@ class InventoryService:
                 inventory_version=saved.version,
             )
             await self._bus.publish(event, uow.outbox)
+            # History shares the event's id and instant, and commits with the stock row.
+            await uow.inventory_changes.add(
+                InventoryChange(
+                    id=str(uuid4()),
+                    sku=saved.sku,
+                    store_id=saved.store_id,
+                    previous_quantity=previous,
+                    new_quantity=saved.quantity,
+                    previous_threshold_override=previous_override,
+                    new_threshold_override=saved.threshold_override,
+                    inventory_version=saved.version,
+                    event_id=event.event_id,
+                    occurred_at=event.occurred_at,
+                )
+            )
         await uow.commit()
         log.info(
             "inventory_upserted sku=%s store=%s quantity=%s version=%s previous=%s",
@@ -186,6 +202,23 @@ class InventoryService:
             previous,
         )
         return InventoryUpdateResult(body=body, status_code=status_code, replayed=False)
+
+    async def changes(
+        self, *, sku: str, store_id: str, limit: int, offset: int
+    ) -> list[InventoryChange]:
+        """History for a known pair. The stock row itself does not have to exist."""
+
+        async with self._uow_factory() as uow:
+            if await uow.products.get(sku) is None:
+                raise NotFoundError(f"Product {sku} not found")
+            if await uow.stores.get(store_id) is None:
+                raise NotFoundError(f"Store {store_id} not found")
+            return await uow.inventory_changes.list(
+                sku=sku,
+                store_id=store_id,
+                limit=limit,
+                offset=offset,
+            )
 
     async def get(self, sku: str, store_id: str) -> InventoryLevel:
         async with self._uow_factory() as uow:

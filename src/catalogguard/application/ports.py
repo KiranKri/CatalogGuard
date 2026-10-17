@@ -13,6 +13,7 @@ from catalogguard.domain.models import (
     EmailHandoff,
     EmailSuppression,
     IdempotencyRecord,
+    InventoryChange,
     InventoryLevel,
     ListingDraft,
     Product,
@@ -94,6 +95,14 @@ class InventoryRepository(Protocol):
     ) -> list[InventoryLevel]: ...
 
     async def any_for_sku(self, sku: str) -> bool: ...
+
+
+class InventoryChangeRepository(Protocol):
+    async def add(self, change: InventoryChange) -> None: ...
+
+    async def list(
+        self, *, sku: str, store_id: str, limit: int, offset: int
+    ) -> list[InventoryChange]: ...
 
 
 class IdempotencyRepository(Protocol):
@@ -268,6 +277,7 @@ class UnitOfWork(Protocol):
     products: ProductRepository
     stores: StoreRepository
     inventory: InventoryRepository
+    inventory_changes: InventoryChangeRepository
     idempotency: IdempotencyRepository
     outbox: OutboxRepository
     processed: ProcessedEventRepository

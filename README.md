@@ -273,6 +273,7 @@ A suppression added after a draft was already decided does not change that decis
 | POST/GET | `/api/v1/stores` | Stores |
 | PUT | `/api/v1/inventory/{sku}/{store_id}` | Set quantity. Requires `Idempotency-Key` and `expected_version` (`0` creates the row) |
 | GET | `/api/v1/inventory`, `/api/v1/inventory/{sku}/{store_id}` | Read on-hand quantity and version |
+| GET | `/api/v1/inventory/{sku}/{store_id}/changes` | Quantity and threshold history for that pair, newest first. Paginated. 404 for an unknown product or store |
 | GET | `/api/v1/thresholds/{sku}/{store_id}` | Effective threshold and which level supplied it |
 | POST | `/api/v1/listings/{sku}/stores/{store_id}/rewrite` | Manual listing draft. Does not queue email |
 | GET | `/api/v1/listings/drafts` | Listing drafts |
@@ -294,6 +295,8 @@ Inventory conflicts:
 - The same key and the same body return the original response and `Idempotency-Replayed: true`
 
 Omit `threshold_override` to leave the current override alone. Send `null` to clear it.
+
+Inventory history (`GET /api/v1/inventory/{sku}/{store_id}/changes`) is append-only. A row is written in the same transaction as the stock row, only when quantity or the threshold override actually changes, and it carries the same `event_id` as that write's `InventoryChanged`. Replays, no-op writes, and rejected writes add nothing. History is not backfilled: changes made before revision `89e567ee29fd`, and seeded stock, have no rows.
 
 ## Configuration
 
@@ -361,7 +364,7 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 
 **Kafka and more than one instance.** Keep writing the outbox in the state-change transaction. The API drain already claims rows. The next move is a publisher that produces leased rows to `catalogguard.events` with key `{sku}|{store_id}`, then marks `published_at`. Run listing rewrite and email drafts as consumers when that work should leave the API process. The skeleton is `KafkaEventBus` in `infrastructure/events/kafka.py`. It raises if called. The swap is described in `adr/0001-kafka-event-bus.md`. SQS is the same shape with a visibility timeout and a dead-letter queue.
 
-**Migrations.** Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. Revision `c81f0f63dcdc` (`dead_letter_redrive`) adds `dead_letter_redrives` on top of that. Revision `5751f906cab6` (`store_listing_revisions`) adds `store_listing_revisions` on top of that. The lease renewal needs no schema change. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
+**Migrations.** Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. Revision `c81f0f63dcdc` (`dead_letter_redrive`) adds `dead_letter_redrives` on top of that. Revision `5751f906cab6` (`store_listing_revisions`) adds `store_listing_revisions` on top of that. Revision `89e567ee29fd` (`inventory_changes`) adds `inventory_changes` on top of that. The lease renewal needs no schema change. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
 
 ## Tests
 
@@ -395,6 +398,14 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 - rollback through publish
 - rolling back to the live version, with a stale version, or to a draft that no longer matches the product
 - the 404 cases
+
+`tests/integration/test_inventory_changes.py` covers inventory history:
+
+- one row per real change (create, quantity, threshold set, threshold cleared), with nothing added for no-op writes, replays, a stale version, or an unknown store
+- matching `event_id` and `occurred_at` with the outbox event
+- newest-first pagination
+- 404s versus an empty page for a pair never stocked
+- no history from the seed
 
 `make lint` runs Ruff. `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and `pytest -q` on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets.
 

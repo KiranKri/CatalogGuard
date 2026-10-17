@@ -23,6 +23,7 @@ from catalogguard.domain.models import (
     EmailHandoff,
     EmailSuppression,
     IdempotencyRecord,
+    InventoryChange,
     InventoryLevel,
     ListingDraft,
     Product,
@@ -39,6 +40,7 @@ from catalogguard.infrastructure.db.orm import (
     EmailHandoffORM,
     EmailSuppressionORM,
     IdempotencyORM,
+    InventoryChangeORM,
     InventoryLevelORM,
     ListingDraftORM,
     LlmUsageORM,
@@ -323,6 +325,57 @@ class InventoryRepository:
     async def any_for_sku(self, sku: str) -> bool:
         stmt = select(InventoryLevelORM.sku).where(InventoryLevelORM.sku == sku).limit(1)
         return (await self._session.scalar(stmt)) is not None
+
+
+def _inventory_change(row: InventoryChangeORM) -> InventoryChange:
+    return InventoryChange(
+        id=row.id,
+        sku=row.sku,
+        store_id=row.store_id,
+        previous_quantity=row.previous_quantity,
+        new_quantity=row.new_quantity,
+        previous_threshold_override=row.previous_threshold_override,
+        new_threshold_override=row.new_threshold_override,
+        inventory_version=row.inventory_version,
+        event_id=row.event_id,
+        occurred_at=_as_utc(row.occurred_at),
+    )
+
+
+class InventoryChangeRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, change: InventoryChange) -> None:
+        await _savepoint_add(
+            self._session,
+            InventoryChangeORM(
+                id=change.id,
+                sku=change.sku,
+                store_id=change.store_id,
+                previous_quantity=change.previous_quantity,
+                new_quantity=change.new_quantity,
+                previous_threshold_override=change.previous_threshold_override,
+                new_threshold_override=change.new_threshold_override,
+                inventory_version=change.inventory_version,
+                event_id=change.event_id,
+                occurred_at=change.occurred_at,
+            ),
+            ConflictError("An inventory change already exists for this event"),
+        )
+
+    async def list(
+        self, *, sku: str, store_id: str, limit: int, offset: int
+    ) -> list[InventoryChange]:
+        stmt = (
+            select(InventoryChangeORM)
+            .where(InventoryChangeORM.sku == sku, InventoryChangeORM.store_id == store_id)
+            .order_by(InventoryChangeORM.occurred_at.desc(), InventoryChangeORM.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.scalars(stmt)).all()
+        return [_inventory_change(row) for row in rows]
 
 
 class IdempotencyRepository:

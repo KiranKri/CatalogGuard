@@ -6,6 +6,7 @@ from catalogguard.domain.models import (
     EmailDraft,
     EmailHandoff,
     EmailSuppression,
+    InventoryChange,
     InventoryLevel,
     ListingDraft,
     Product,
@@ -51,6 +52,21 @@ def inventory_out(level: InventoryLevel) -> dict[str, object]:
         "version": level.version,
         "threshold_override": level.threshold_override,
         "updated_at": level.updated_at.isoformat(),
+    }
+
+
+def inventory_change_out(change: InventoryChange) -> dict[str, object]:
+    return {
+        "id": change.id,
+        "sku": change.sku,
+        "store_id": change.store_id,
+        "previous_quantity": change.previous_quantity,
+        "new_quantity": change.new_quantity,
+        "previous_threshold_override": change.previous_threshold_override,
+        "new_threshold_override": change.new_threshold_override,
+        "inventory_version": change.inventory_version,
+        "event_id": change.event_id,
+        "occurred_at": change.occurred_at.isoformat(),
     }
 
 

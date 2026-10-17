@@ -11,6 +11,7 @@ from catalogguard.infrastructure.db.repositories import (
     EmailSuppressionRepository,
     IdempotencyRepository,
     InteractionRepository,
+    InventoryChangeRepository,
     InventoryRepository,
     ListingDraftRepository,
     LlmUsageRepository,
@@ -34,6 +35,7 @@ class SqlUnitOfWork:
         self.products = ProductRepository(session)
         self.stores = StoreRepository(session)
         self.inventory = InventoryRepository(session)
+        self.inventory_changes = InventoryChangeRepository(session)
         self.idempotency = IdempotencyRepository(session)
         self.outbox = OutboxRepository(session)
         self.processed = ProcessedEventRepository(session)

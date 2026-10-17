@@ -124,6 +124,25 @@ class InventoryUpdateResponse(InventoryResponse):
     previous_quantity: int | None
 
 
+class InventoryChangeResponse(BaseModel):
+    id: str
+    sku: str
+    store_id: str
+    previous_quantity: int | None
+    new_quantity: int
+    previous_threshold_override: int | None
+    new_threshold_override: int | None
+    inventory_version: int
+    event_id: str
+    occurred_at: str
+
+
+class InventoryChangePage(BaseModel):
+    items: list[InventoryChangeResponse]
+    limit: int
+    offset: int
+
+
 class ThresholdResponse(BaseModel):
     sku: str
     store_id: str
