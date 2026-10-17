@@ -1,6 +1,34 @@
 # CatalogGuard
 
-Product catalog and per-store inventory for a multi-store retailer. When on-hand quantity for a SKU in a store crosses below its effective threshold, CatalogGuard stores a new SEO listing draft and queues a low-stock email draft. It does not change the live listing, and it does not send email. A separate one-shot worker records which queued drafts a downstream mailer may take, with suppressed customers removed.
+A stock write for one store commits the new quantity, its history row, its idempotency record, and its outbox event in one transaction, and every handler downstream of it is safe to run twice; a multi-store retail catalog is the domain those controls are wrapped around. When a SKU crosses below its threshold in a store, CatalogGuard stores a listing draft and queues an email draft, but it does not change live product SEO and it does not send email.
+
+AI coding assistants wrote the code under the author's direction; the author set the rules each change had to meet and reviewed the result.
+
+## Controls
+
+| Control | Where | Proof |
+| --- | --- | --- |
+| Idempotent write | `src/catalogguard/application/inventory.py` (`InventoryService.upsert`) | `tests/unit/test_idempotency.py` |
+| Optimistic concurrency | same file, the version compare-and-set in `InventoryService._apply` | `tests/unit/test_concurrency.py` |
+| Outbox and lease | `src/catalogguard/infrastructure/events/bus.py` (`InProcessEventBus`) | `tests/integration/test_outbox_lease.py`, `tests/unit/test_outbox_claim.py` |
+| Guarded model output | `src/catalogguard/application/listing_validation.py` (`validate_listing`) | `tests/unit/test_listing_validation.py`, `tests/unit/test_listing_eval.py`, `evals/listing_guardrail.json` |
+| Cost cap | `src/catalogguard/application/listing.py` (`ListingService._reserve_llm_call`) | `tests/unit/test_cost_cap.py` |
+| Crossing and cooldown | `src/catalogguard/domain/crossing.py` | `tests/unit/test_crossing.py`, `tests/unit/test_flapping.py`, `tests/integration/test_suppressed_crossings.py` |
+| Recovery | `src/catalogguard/application/redrive.py` | `tests/integration/test_dead_letter_redrive.py` |
+
+### Decisions
+
+- Quantity is an absolute set with `expected_version`, because two writers must never both apply a delta. The loser gets 409 and `current_version`.
+- The outbox row commits in the same transaction as the stock change, so a crash cannot leave a new quantity with no event.
+- A crossing inside the cooldown is stored and dropped, not deferred, so a flapping count does not rewrite the listing on every wobble.
+- Low stock stores a draft. A store's live listing changes only when an operator publishes a draft, and the model path never writes the product's own SEO fields.
+- Every `[[key]]` must name a real attribute, with that attribute's value in the 48 characters before the marker. Uncited prose can still slip through.
+- The LLM cap is per SKU per UTC day, shared by every store, and counted before the provider call. There is no global budget.
+- SQLite is the default so the demo needs no Docker. Two processes against one SQLite file are not supported.
+
+### Not built on purpose
+
+No login, no UI, no SMTP, and no Kafka client. The in-repo Kafka adapter, `KafkaEventBus`, raises if called. See [What this service does not do](#what-this-service-does-not-do).
 
 ## At a glance
 
@@ -18,13 +46,13 @@ To try it, run these from the repository root (PowerShell shown):
 2. `uv pip install --python .venv -e ".[dev]"` (or `.\.venv\Scripts\python -m pip install -e ".[dev]"`)
 3. `make seed`
 4. `make run`
-5. In a second terminal, follow the [curl walkthrough](#curl-walkthrough), then [hand the queued draft to a mailer](#hand-the-queued-draft-to-a-mailer).
+5. In a second terminal, follow the [curl walkthrough](#curl-walkthrough), then [hand the queued draft to a mailer](#hand-the-queued-draft-to-a-mailer). The [second run](#walkthrough-continued-the-cap-a-dead-letter-and-a-redrive) shows a failure and its recovery.
 
 The Makefile uses `.venv` when it exists, so activating the venv is optional. Without `make`, run the `python -m …` line from the matching Makefile target.
 
-**Tests:** run `make test` and `make lint`. GitHub Actions runs the same checks on SQLite with the stub LLM.
+**Tests:** run `make test` and `make lint`. A GitHub Actions workflow is set up to run the same checks on SQLite with the stub LLM. It has not run yet, because the repository has not been pushed.
 
-**Limits:** Docker Compose describes the Postgres layout, but it has not been executed in CI. Two processes against one SQLite file are not supported.
+**Limits:** Docker Compose describes the Postgres layout, but it has not been run, so Postgres in Docker Compose is described and unproven. Two processes against one SQLite file are not supported.
 
 Stack: Python 3.12, FastAPI, SQLAlchemy 2, Pydantic v2, SQLite by default, Postgres in Docker Compose. FastAPI fits this service: the work is an I/O-bound catalog API plus one LLM call, with a small domain that is easier to test outside the framework.
 
@@ -174,7 +202,7 @@ Postgres:
 docker compose up --build
 ```
 
-Compose starts Postgres and the API, with `SEED_ON_STARTUP=true` and the stub provider. The same curls below work against `http://127.0.0.1:8000`. `docker compose down -v` drops the database volume.
+Compose is set up to start Postgres and the API, with `SEED_ON_STARTUP=true` and the stub provider, and the same curls below are meant to work against `http://127.0.0.1:8000`. It has not been run. `docker compose down -v` drops the database volume.
 
 ## Curl walkthrough
 
@@ -266,6 +294,68 @@ curl.exe -s --% -X POST "http://127.0.0.1:8000/api/v1/email-suppressions" -H "Co
 
 A suppression added after a draft was already decided does not change that decision. Because of the 24-hour cooldown, a second crossing for the same pack and store will not queue a new draft the same day.
 
+### Walkthrough continued: the cap, a dead letter, and a redrive
+
+**Start the server for this part with `LLM_DAILY_CAP_PER_SKU=1`.** Do it as a second run, after the steps above, so those stay copy-pasteable on a default server. This part uses `SKLT-12-BLK` at `nyc`, which the steps above do not touch. The seed has it at quantity 14, version 1, under the global threshold of 5. One New York customer, `cus_2201`, added it to a cart. If you have already run this part on this database, delete `catalogguard.db` and run `make seed` first.
+
+In the server terminal, stop the server (Ctrl+C) and start it again with a cap of one model call per SKU per day:
+
+```powershell
+$env:LLM_DAILY_CAP_PER_SKU = "1"
+make run
+```
+
+In the second terminal, spend the one call, hit the cap, then cross the threshold:
+
+```powershell
+curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/listings/SKLT-12-BLK/stores/nyc/rewrite"
+curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/listings/SKLT-12-BLK/stores/nyc/rewrite"
+
+curl.exe -s -D - --% -X PUT "http://127.0.0.1:8000/api/v1/inventory/SKLT-12-BLK/nyc" -H "Content-Type: application/json" -H "Idempotency-Key: walkthrough-sklt-nyc-1" --data-raw "{\"quantity\":3,\"expected_version\":1}"
+
+curl.exe -s "http://127.0.0.1:8000/api/v1/dead-letters"
+curl.exe -s "http://127.0.0.1:8000/api/v1/email-drafts?sku=SKLT-12-BLK&store_id=nyc"
+```
+
+What you should see:
+
+- The first rewrite returns 201 with a `manual` draft whose `status` is `ready`. That spends the SKU's one call for the UTC day.
+- The second rewrite returns 429 with code `llm_cost_limit` and the message `Daily LLM cap of 1 calls reached for SKU SKLT-12-BLK`.
+- The PUT returns 200 with quantity 3, previous quantity 14, and version 2. A handler failure does not undo the stock write.
+- `GET /api/v1/dead-letters` lists a letter with `handler` `listing_rewrite`, the same daily-cap message as its `error`, and `redrive_count` 0.
+- One email draft, `status` `queued`, subject `Only 3 left in Hudson Market — act now`, with one recipient: `cus_2201` (`add_to_cart`).
+
+The crossing fans out to two handlers. The cap stops the listing handler before it calls the model, so that handler dead-letters. The email handler makes no model call and the cap does not gate it, so the email draft is still queued.
+
+Now raise the cap. In the server terminal, stop the server and start it again:
+
+```powershell
+$env:LLM_DAILY_CAP_PER_SKU = "24"
+make run
+```
+
+The dead letter is still in `catalogguard.db`. A restart neither clears it nor retries it. In the second terminal, redrive it twice:
+
+```powershell
+$letter = (Invoke-RestMethod "http://127.0.0.1:8000/api/v1/dead-letters").items | Where-Object { $_.handler -eq "listing_rewrite" -and $_.payload.sku -eq "SKLT-12-BLK" } | Select-Object -First 1
+curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/$($letter.id)/redrive"
+curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/$($letter.id)/redrive"
+
+curl.exe -s "http://127.0.0.1:8000/api/v1/dead-letters"
+curl.exe -s "http://127.0.0.1:8000/api/v1/listings/drafts?sku=SKLT-12-BLK&store_id=nyc"
+curl.exe -s "http://127.0.0.1:8000/api/v1/email-drafts?sku=SKLT-12-BLK&store_id=nyc"
+```
+
+What you should see:
+
+- The first POST returns 200 with `"result": "succeeded"` and `"replayed": false`.
+- The second POST returns 200 with `"result": "replayed"`, `"replayed": true`, and the same `redrive_id`. The handler did not run again.
+- The letter is kept, with `redrive_count` 1 and `last_redrive_status` `succeeded`. A replay records no new attempt, so the count stays at 1.
+- Two listing drafts: the earlier `manual` one, and a `low_inventory` draft whose `trigger_event_id` is the letter's `event_id`.
+- Still one email draft. The redrive ran only the named `listing_rewrite` handler, not the email handler.
+
+Read the email subject with `curl.exe`, as above, not `Invoke-RestMethod`. PowerShell 5.1 misreads the em dash because the JSON response declares no charset. When you are done, run `Remove-Item Env:LLM_DAILY_CAP_PER_SKU` so the next start uses the `.env` value, or the default of 24.
+
 ## API
 
 | Method | Path | Role |
@@ -316,7 +406,7 @@ See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline di
 
 ## Production notes
 
-**Scaling.** SQLite is the dev default. Do not run two writers against one SQLite file. On SQLite, SQLAlchemy issues `BEGIN IMMEDIATE` itself, so savepoints take part in the unit-of-work transaction and a failure rolls back the processed-event mark with the rest of the work. That means two API processes, or the API plus `make drain`. Postgres is the database when more than one process drains the outbox.
+**Scaling.** SQLite is the dev default. Do not run two writers against one SQLite file. That means two API processes, or the API plus `make drain`. Postgres is the database when more than one process drains the outbox. On SQLite, SQLAlchemy issues `BEGIN IMMEDIATE` itself, so savepoints take part in the unit-of-work transaction and a failure rolls back the processed-event mark with the rest of the work.
 
 - **Leases.** The drain leases each batch before dispatch. On Postgres that lease is `SELECT … FOR UPDATE SKIP LOCKED`, and `mark_published` only succeeds for the token that holds the lease. A lease older than `OUTBOX_CLAIM_TIMEOUT_SECONDS` (300) can be taken again. The low-stock event id is derived from the inventory event id, so two drainers cannot insert two downstream events for one write.
 - **Renewal.** While a batch runs, a keeper task renews its lease every `OUTBOX_LEASE_RENEW_SECONDS` (60), so a slow model call no longer lets another worker take rows that are still being worked on. The renew interval must be greater than 0 and less than the claim timeout, or the API and the drain worker refuse to start.
@@ -437,11 +527,11 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 - a redelivered event, and the unique `inventory_event_id` backstop
 - the store and SKU filters, ordering, pagination, and the 404
 
-`make lint` runs Ruff. `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and `pytest -q` on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets.
+`make lint` runs Ruff. `.github/workflows/ci.yml` is set up to run `ruff check`, `ruff format --check`, and `pytest -q`, the same checks as `make lint` and `make test`, on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets. It has not run yet, because the repository has not been pushed.
 
 ## What this service does not do
 
-Authentication, email delivery, a UI, multi-tenancy beyond the store model, payments, and carts. The email handoff records a decision for a mailer. It does not deliver anything. `RecentInteraction` is seeded. Publishing a draft updates the store listing inside this service. It does not push that copy to an external storefront.
+Authentication, email delivery (no SMTP), a UI, a Kafka client, multi-tenancy beyond the store model, payments, and carts. `KafkaEventBus` is a skeleton that raises if called. The email handoff records a decision for a mailer. It does not deliver anything. `RecentInteraction` is seeded. Publishing a draft updates the store listing inside this service. It does not push that copy to an external storefront.
 
 ## License
 
