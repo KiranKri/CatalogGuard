@@ -4,6 +4,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -51,6 +52,22 @@ DRAIN_FAILURES = Counter(
     "Outbox drain failures that were caught after a write had committed.",
     registry=REGISTRY,
 )
+LEASE_LOST = Counter(
+    "catalogguard_outbox_lease_lost_total",
+    "Outbox batches whose lease another worker took before this worker finished.",
+    registry=REGISTRY,
+)
+OUTBOX_UNPUBLISHED = Gauge(
+    "catalogguard_outbox_unpublished",
+    "Unpublished outbox rows, as of the last drain or summary read in this process.",
+    registry=REGISTRY,
+)
+OUTBOX_OLDEST = Gauge(
+    "catalogguard_outbox_oldest_unpublished_seconds",
+    "Age in whole seconds of the oldest unpublished outbox row, 0 when there is none. "
+    "As of the last drain or summary read in this process.",
+    registry=REGISTRY,
+)
 HANDLER_RETRIES = Counter(
     "catalogguard_handler_retries_total",
     "Handler attempts that failed and will be tried again.",
@@ -86,6 +103,13 @@ class PrometheusMetrics:
 
     def drain_failure(self) -> None:
         DRAIN_FAILURES.inc()
+
+    def outbox_lease_lost(self) -> None:
+        LEASE_LOST.inc()
+
+    def outbox_backlog(self, unpublished: int, oldest_age_seconds: int | None) -> None:
+        OUTBOX_UNPUBLISHED.set(unpublished)
+        OUTBOX_OLDEST.set(0 if oldest_age_seconds is None else oldest_age_seconds)
 
     def handler_retry(self, handler: str) -> None:
         HANDLER_RETRIES.labels(handler=handler).inc()

@@ -80,6 +80,23 @@ class StoreListing:
 
 
 @dataclass(frozen=True)
+class StoreListingRevision:
+    """Append-only copy of the customer-facing text one publish made live."""
+
+    id: str
+    sku: str
+    store_id: str
+    version: int
+    published_draft_id: str
+    title: str
+    short_description: str
+    long_description: str
+    meta_title: str
+    meta_description: str
+    published_at: datetime
+
+
+@dataclass(frozen=True)
 class EmailDraft:
     id: str
     sku: str

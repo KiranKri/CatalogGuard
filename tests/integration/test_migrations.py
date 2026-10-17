@@ -75,10 +75,42 @@ def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
     assert [(row[2], row[3], row[4]) for row in redrive_keys] == [
         ("dead_letters", "dead_letter_id", "id")
     ]
+    assert "store_listing_revisions" in tables
+    revision_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(store_listing_revisions)")
+    }
+    assert revision_columns == {
+        "id",
+        "sku",
+        "store_id",
+        "version",
+        "published_draft_id",
+        "title",
+        "short_description",
+        "long_description",
+        "meta_title",
+        "meta_description",
+        "published_at",
+    }
+    revision_indexes = {
+        row[1]: row[2] for row in connection.execute("PRAGMA index_list(store_listing_revisions)")
+    }
+    assert revision_indexes.get("ix_store_listing_revisions_published") == 0
+    assert any(
+        unique
+        and [col[2] for col in connection.execute(f"PRAGMA index_info('{name}')")]
+        == ["sku", "store_id", "version"]
+        for name, unique in revision_indexes.items()
+    )
+    revision_keys = list(connection.execute("PRAGMA foreign_key_list(store_listing_revisions)"))
+    assert [(row[2], row[3], row[4]) for row in revision_keys] == [
+        ("listing_drafts", "published_draft_id", "id")
+    ]
     version = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert version == ("c81f0f63dcdc",)
+    assert version == ("5751f906cab6",)
     connection.close()
 
     scripts = ScriptDirectory(str(_ROOT / "migrations"))
-    assert scripts.get_current_head() == "c81f0f63dcdc"
+    assert scripts.get_current_head() == "5751f906cab6"
+    assert scripts.get_revision("5751f906cab6").down_revision == "c81f0f63dcdc"
     assert scripts.get_revision("c81f0f63dcdc").down_revision == "15e685dc71f6"

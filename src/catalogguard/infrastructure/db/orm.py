@@ -119,6 +119,34 @@ class StoreListingORM(Base):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class StoreListingRevisionORM(Base):
+    """Append-only history of live store listing text. One row per stored live version."""
+
+    __tablename__ = "store_listing_revisions"
+    __table_args__ = (
+        UniqueConstraint("sku", "store_id", "version", name="uq_store_listing_revisions_version"),
+        Index("ix_store_listing_revisions_published", "sku", "store_id", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    sku: Mapped[str] = mapped_column(String(64), nullable=False)
+    store_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    published_draft_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "listing_drafts.id",
+            name="fk_store_listing_revisions_published_draft_id",
+        ),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    short_description: Mapped[str] = mapped_column(Text, nullable=False)
+    long_description: Mapped[str] = mapped_column(Text, nullable=False)
+    meta_title: Mapped[str] = mapped_column(Text, nullable=False)
+    meta_description: Mapped[str] = mapped_column(Text, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class LlmUsageORM(Base):
     """Calls reserved for one SKU on one UTC day. The cap is enforced in the write."""
 

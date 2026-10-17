@@ -131,3 +131,98 @@ Operators can recover a handler dead letter without SQL and without replaying ev
 - **No auth.** The endpoint is as unauthenticated as the rest of the API. A listing redrive spends LLM budget through the normal per-SKU cap.
 - **No Postgres run.** Docker is not available here, so the redrive path ran only on SQLite.
 - **Out of scope.** No changes to thresholds, cooldown, listing validation, citation rules, the LLM providers, the handoff decision rules, the prompt text, Compose, or inline dispatch.
+
+---
+
+# DEV_NOTES: lease renewal, drain worker, and listing history
+
+The sections above are kept as written. The redrive work is committed as `4c814aa`, and its prompt as `f473764`. This section's work is committed separately on top of those.
+
+## What I built
+
+### Feature A: lease renewal, drain worker, and backlog
+
+- **Renewal in the repository.** `OutboxRepository.renew(token=, now=, message_ids=)` returns `renewed`, `idle`, or `lost`. The constants live in `application/ports.py`.
+  1. It first checks whether any still-unpublished row among the batch ids has a null or different token. If so, the result is `lost`, and nothing is updated.
+  2. Otherwise it sets `claimed_at = now` on unpublished rows holding this token (`WHERE published_at IS NULL AND claim_token = token`) and returns `renewed`, or `idle` if no row matched.
+  Published rows are never touched. Zero rows updated on its own is `idle`, not `lost`.
+- **Keeper in the bus.** `InProcessEventBus` starts one keeper task per claimed batch, before the first handler, and cancels it in a `finally` once the batch is done. Between renewals it waits `OUTBOX_LEASE_RENEW_SECONDS` through `self._sleep`, which is `asyncio.sleep` in production and replaceable in tests.
+  - `idle`: the keeper stops quietly.
+  - `lost`: it increments `catalogguard_outbox_lease_lost_total` once, logs `outbox_lease_lost` with the token only, flags the batch, and stops.
+  - A renew that raises is logged and retried on the next tick.
+- **Drain loop on a lost batch.** The loop dispatches nothing more from a lost batch and skips `mark_published` for a handler that returned after the loss. A lost lease is not counted as a drain failure and writes no dead letter. `outbox_decode` quarantine is unchanged apart from stopping once the lease is lost.
+- **Startup check.** `0 < OUTBOX_LEASE_RENEW_SECONDS < OUTBOX_CLAIM_TIMEOUT_SECONDS` is enforced in `build_runtime`, so `create_app` and the drain worker both raise `RuntimeError` with the setting name. The defaults, 60 and 300, pass.
+- **Drain worker.** `python -m catalogguard.drain` and `make drain` (real tab, `$(PYTHON)`) build the API runtime, drain until idle, print `{"unpublished_before": N, "unpublished_after": M}`, and exit. It creates tables only on SQLite.
+- **Backlog.** `GET /api/v1/outbox/summary` returns `unpublished`, `claimed`, and `oldest_unpublished_age_seconds`. It uses the injected clock, never negative, truncated toward zero, and null when nothing is pending. The service is `OutboxSummaryService` in `application/queries.py`. The gauges `catalogguard_outbox_unpublished` and `catalogguard_outbox_oldest_unpublished_seconds` are set when the summary is read and at the end of every drain. A drain only logs a failure of that read and never fails because of it. No payloads are read or logged.
+
+### Feature B: listing history and rollback
+
+- **Table.** `store_listing_revisions`, in the ORM and in revision `5751f906cab6` (parent `c81f0f63dcdc`):
+  - columns: `id`, `sku`, `store_id`, `version`, `published_draft_id`, the five text fields, `published_at`
+  - unique `uq_store_listing_revisions_version (sku, store_id, version)`
+  - index `ix_store_listing_revisions_published (sku, store_id, published_at)`
+  - FK `fk_store_listing_revisions_published_draft_id` to `listing_drafts.id`
+  The downgrade drops the index and the table. Earlier revisions are untouched.
+- **Writes.** `ListingService.publish` appends one revision in the same transaction as the live row, only on the branch that stores a new version. The revision copies the stripped `saved` text, never the draft text. The "same draft, matching `expected_version`" branch returns before that and writes nothing.
+- **Rollback.** `ListingService.rollback` checks, in this order: no live row (404), no such revision (404), revision equal to the live version (409 `That revision is already live`). Otherwise it calls the existing `publish` with that revision's draft id and the request's `expected_version`. There is no second compare-and-set.
+- **HTTP.**
+  - `GET /api/v1/listings/{sku}/stores/{store_id}/revisions`: paginated, newest version first.
+  - `POST /api/v1/listings/{sku}/stores/{store_id}/rollback`: body `{revision_version, expected_version}`; returns the live listing.
+  - There is no unpublish and no revision delete.
+- **No backfill.** A listing published before this revision has no history until its next publish. The README says so.
+
+### Docs and setup
+
+- **README.** The scaling paragraph is rewritten: renewal, idle versus lost, the drain worker, the summary endpoint, Compose stays inline, and "two writers" now names the drain worker. Also updated: the inline-dispatch paragraph, the publish paragraph (revisions, rollback, no backfill), the mailer table-creation rule, the API table, the configuration defaults, the migrations note, and the tests note. There is a short PowerShell snippet for `make drain` and the summary GET. The inventory curl walkthrough is unchanged.
+- **`.env.example`.** Adds `OUTBOX_LEASE_RENEW_SECONDS=60`. No drain batch setting, because the worker drains until idle and the code does not need one.
+- **Local database.** Recreated with `make seed`. This is recorded in the final check below.
+
+## Where I adapted the prompt to the repository
+
+- **Section 1, the redrive commit.** The prompt said `main` was `8deb824` with the redrive uncommitted. In the repository, the redrive code was already committed on `main` as `4c814aa`. Only `claude_dev_prompt_redrive.md`, one of the listed paths, was still untracked, so `git status` was not clean and the skip rule did not quite apply. I committed only that file, as `f473764` on `main`. I did not amend `4c814aa`. I gave it an accurate message instead of "Add dead-letter redrive.", because the commit contains only the prompt. `claude_dev_prompt_reliability.md` was not staged.
+- **Partial steal.** The prompt's `renewed` and `lost` definitions overlap when another worker takes part of a batch. `lost` wins, so this worker neither renews nor keeps dispatching rows someone else now owns. Rows it still held are left until their lease expires.
+- **Drain worker always runs inline.** It copies the settings with `EVENT_DISPATCH=inline`, because an async `drain()` would return before any work happened. The API default and Compose are unchanged.
+- **Gauges in the bus.** The gauges are set at the end of every drain, in any process, because the bus cannot tell whether it runs in the API or the worker. That is harmless in the worker, whose gauges die with it, as the README says.
+- **`lost` metric location.** The metric is counted by the bus keeper, not the repository. The repository-level "stolen" test therefore asserts `lost` and that the old token cannot publish. The metric increment is asserted in the bus-level lost-batch test.
+- **Migration test chain.** `test_migrations.py` now expects head `5751f906cab6`, and checks both links of the chain: `5751f906cab6` → `c81f0f63dcdc` → `15e685dc71f6`.
+
+## How I tested
+
+- **Suite and lint.** `make test`: 82 passed (64 before, plus 13 in `tests/integration/test_outbox_lease.py` and 5 in `tests/integration/test_listing_revisions.py`). `make lint`: clean.
+- **Feature A tests:**
+  - **Repository renewal.** `renewed` moves `claimed_at` forward, and a claim at +301 s then takes nothing. After `mark_published` the result is `idle`, and the lost counter does not move.
+  - **Repository steal.** A claim at +301 s under another token makes the old token's `renew` return `lost`. The old token's `mark_published` leaves `published_at` null, and the thief's lease is untouched.
+  - **Keeper during a handler.** A handler blocked on an event, with `_sleep` replaced to advance `FakeClock` by 60 s once and then park. `claimed_at` moves to +60 s, and a claim at +310 s gets nothing. After release, the row is published.
+  - **Lost batch.** `_sleep` steals both rows of a two-row batch. The keeper reports `lost` (+1 on the counter, through a metrics spy). Only one handler call happens, neither row is published by the lost worker (both still carry the thief's token), drain failures are unchanged, and there are no dead letters.
+  - **Keeper after the last publish.** It returns `idle`, the lease is not flagged, and the counter does not move.
+  - **Async API plus drain worker.** `event_dispatch=async`, with the API bus `drain` replaced by a no-op. After the PUTs: no draft, summary `unpublished` 2. `run_once` with the harness clock gives `{2 → 0}`, one `ready` draft, and one `queued` email. A second `run_once` gives `unpublished_after` 0.
+  - **Inline harness.** The draft is there when the PUT returns, and the summary shows `unpublished` 0.
+  - **CLI on a fresh database.** `main()` on a fresh SQLite file prints the zero summary and creates the tables.
+  - **Summary endpoint.** Zeros and null age to start. One row, then +10 s: 1/0/10, with gauges 1 and 10. Claimed: 1. Then +301.9 s: 1/0, age 311 (truncated).
+  - **Startup check.** `harness(outbox_lease_renew_seconds=0|300|301)` raises `RuntimeError`, and so does `run_once` with a bad setting. The existing `tests/unit/test_outbox_claim.py`, an unrenewed lease reclaimable at +301 s, is untouched and passes.
+- **Feature B tests:**
+  - **First publish.** It writes one revision, version 1, with no `[[` and equal to the live row, while the draft keeps its markers and product SEO is unchanged. Republishing the same draft at `expected_version` 1 returns version 1 and adds no revision.
+  - **Second publish.** Revisions are `[2, 1]`, newest first, and pagination works.
+  - **Rollback.** Rolling back to 1 at `expected_version` 2 gives live version 3 with revision 1's text and three revisions, with product SEO unchanged.
+  - **Rollback refusals.** Rolling back to the live version is 409 `That revision is already live`. A stale `expected_version` is 409 `optimistic_conflict` with `current_version` 3.
+  - **Product changed.** After PATCHing `color`, rolling back to 1 is 409 `conflict`, the live version stays 2, and the revision count stays 2.
+  - **404s.** Rollback with no live row is 404, and so is an unknown revision.
+  - **Distinct copy.** The tests use two different valid `FixedLLM` payloads, so the rollback text check cannot pass by accident.
+- **Migration check, run but not added to the suite.** Alembic `compare_metadata` against an upgraded SQLite file reported no differences. Downgrading to `c81f0f63dcdc` removed the table, and upgrading again restored it.
+- **Live smoke test.** On a scratch database:
+  1. `make drain` on a fresh seed printed the zero summary.
+  2. With uvicorn running, the crossing PUT gave a summary of zeros.
+  3. Publish gave v1, and a second draft gave v2. The revisions were `[2, 1]` with no markers.
+  4. Rollback to 1 gave v3 using draft 1's id. Rolling back to 3 returned 409 `That revision is already live`.
+  5. Both gauges read 0. The server was stopped, with no tracebacks.
+- **Test-suite timing.** Some full runs took about 125 s, against about 45 s earlier. An interleaved comparison of `tests/unit` between a temporary worktree of `HEAD` and this tree (54 s and 47 s against 47 s and 49 s) shows the same speed. The variance is the machine, not this change. I removed the worktree afterwards.
+
+## What I deliberately did not do
+
+- **No releasing rows on lost.** On `lost`, rows still under this worker's token wait for their lease to expire. I did not clear them for immediate reclaim.
+- **No renew-failure metric.** A failed renew is logged and retried on the next tick. It has no metric and does not stop the batch.
+- **No daemon or batch cap.** The drain worker drains until idle, which is what the prompt asks for, so there is no batch cap or setting. There is no daemon or schedule.
+- **No backfill, unpublish, or revision delete.**
+- **Rollback to a revision whose draft is already live.** For example, v3 republished draft 1 and you roll back to v1. `publish`'s "same draft" branch returns the live row unchanged, so the rollback succeeds and changes nothing. I kept that `publish` behavior instead of adding a separate rule.
+- **No Postgres run.** Docker is not available here, so `SKIP LOCKED` together with renewal ran only on SQLite.
+- **Out of scope.** No changes to thresholds, cooldown, validation, citation rules, LLM providers, handoff rules, prompt text, Compose dispatch, or the redrive behavior.

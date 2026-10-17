@@ -18,6 +18,7 @@ from catalogguard.infrastructure.db.repositories import (
     ProcessedEventRepository,
     ProductRepository,
     StoreListingRepository,
+    StoreListingRevisionRepository,
     StoreRepository,
 )
 
@@ -39,6 +40,7 @@ class SqlUnitOfWork:
         self.cooldowns = CooldownRepository(session)
         self.drafts = ListingDraftRepository(session)
         self.live_listings = StoreListingRepository(session)
+        self.listing_revisions = StoreListingRevisionRepository(session)
         self.usage = LlmUsageRepository(session)
         self.emails = EmailDraftRepository(session)
         self.suppressions = EmailSuppressionRepository(session)

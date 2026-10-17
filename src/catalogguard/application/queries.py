@@ -1,10 +1,55 @@
 """Read models that are not owned by a write use case."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from catalogguard.application.ports import UnitOfWorkFactory
+from catalogguard.application.ports import Clock, Metrics, OutboxStats, UnitOfWorkFactory
 from catalogguard.domain.models import DeadLetter, DeadLetterRedrive
+
+
+@dataclass(frozen=True)
+class OutboxBacklog:
+    unpublished: int
+    claimed: int
+    oldest_unpublished_age_seconds: int | None
+
+
+def outbox_backlog(stats: OutboxStats, *, now: datetime) -> OutboxBacklog:
+    """Whole seconds, truncated toward zero, never negative. None when nothing is pending."""
+
+    age: int | None = None
+    if stats.oldest_created_at is not None:
+        age = max(0, int((now - stats.oldest_created_at).total_seconds()))
+    return OutboxBacklog(
+        unpublished=stats.unpublished,
+        claimed=stats.claimed,
+        oldest_unpublished_age_seconds=age,
+    )
+
+
+class OutboxSummaryService:
+    """Backlog read from the database, so it does not depend on which process drained last."""
+
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory,
+        *,
+        clock: Clock,
+        metrics: Metrics,
+        claim_timeout_seconds: int,
+    ) -> None:
+        self._uow_factory = uow_factory
+        self._clock = clock
+        self._metrics = metrics
+        self._claim_timeout = timedelta(seconds=claim_timeout_seconds)
+
+    async def summary(self) -> OutboxBacklog:
+        now = self._clock.now()
+        async with self._uow_factory() as uow:
+            stats = await uow.outbox.stats(claimed_since=now - self._claim_timeout)
+        backlog = outbox_backlog(stats, now=now)
+        self._metrics.outbox_backlog(backlog.unpublished, backlog.oldest_unpublished_age_seconds)
+        return backlog
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,12 @@ database. A lease older than the claim timeout can be taken again. Kafka is
 still the path when consumers should run outside the API process. See
 adr/0001-kafka-event-bus.md.
 
+While a batch runs, a keeper task renews its lease every
+OUTBOX_LEASE_RENEW_SECONDS. If another worker took any unpublished row of the
+batch, the lease is lost: the keeper stops, and this worker dispatches nothing
+more from that batch and does not mark the rest published. Handlers stay
+idempotent, so the new owner can run them again.
+
 Handlers for one event run concurrently. Failures retry with backoff, then
 land in dead_letters. The outbox row is marked published after that so a
 permanent failure cannot wedge the drain.
@@ -13,12 +19,21 @@ permanent failure cannot wedge the drain.
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from uuid import uuid4
 
 import structlog
 
-from catalogguard.application.ports import Metrics, OutboxMessage, UnitOfWorkFactory
+from catalogguard.application.ports import (
+    LEASE_IDLE,
+    LEASE_LOST,
+    Metrics,
+    OutboxMessage,
+    UnitOfWorkFactory,
+)
+from catalogguard.application.queries import outbox_backlog
 from catalogguard.domain.errors import CostLimitError, NonRetryableError
 from catalogguard.domain.events import DomainEvent
 from catalogguard.domain.models import DeadLetter
@@ -34,6 +49,13 @@ def handler_name(handler: object) -> str:
     return str(getattr(handler, "name", handler.__class__.__name__))
 
 
+@dataclass
+class _Lease:
+    token: str
+    message_ids: list[int]
+    lost: bool = False
+
+
 class InProcessEventBus:
     def __init__(
         self,
@@ -45,6 +67,7 @@ class InProcessEventBus:
         backoff_seconds: float,
         mode: str,
         claim_timeout_seconds: int = 300,
+        lease_renew_seconds: float = 60,
     ) -> None:
         if mode not in {"inline", "async"}:
             raise ValueError("event dispatch mode must be inline or async")
@@ -57,6 +80,9 @@ class InProcessEventBus:
         self._backoff = backoff_seconds
         self._mode = mode
         self._claim_timeout = timedelta(seconds=claim_timeout_seconds)
+        self._renew_seconds = lease_renew_seconds
+        # The keeper's wait between renewals. Tests replace it to move a fake clock.
+        self._sleep: Callable[[float], Awaitable[object]] = asyncio.sleep
         self._handlers: dict[str, list[object]] = {}
         self._lock = asyncio.Lock()
         self._drain_task: asyncio.Task[None] | None = None
@@ -106,26 +132,75 @@ class InProcessEventBus:
         async with self._lock:
             while True:
                 now = self._clock.now()
+                token = str(uuid4())
                 async with self._uow_factory() as uow:
                     batch = await uow.outbox.claim(
                         limit=50,
                         now=now,
                         reclaim_before=now - self._claim_timeout,
-                        token=str(uuid4()),
+                        token=token,
                     )
                     await uow.commit()
                 if not batch:
-                    return
-                for message in batch:
-                    token = message.claim_token or ""
-                    try:
-                        event = load_event(dict(message.payload))
-                    except Exception as exc:
-                        log.exception("outbox_decode_failed id=%s", message.id)
-                        await self._quarantine(message, exc)
-                        continue
-                    await self._dispatch(event)
-                    await self._finish_claim(message.id, token)
+                    break
+                await self._run_batch(batch, token)
+            await self._record_backlog()
+
+    async def _run_batch(self, batch: list[OutboxMessage], token: str) -> None:
+        lease = _Lease(token=token, message_ids=[message.id for message in batch])
+        keeper = asyncio.create_task(self._keep_lease(lease))
+        try:
+            for message in batch:
+                if lease.lost:
+                    # Leave the rest for whoever holds the lease now.
+                    break
+                try:
+                    event = load_event(dict(message.payload))
+                except Exception as exc:
+                    log.exception("outbox_decode_failed id=%s", message.id)
+                    await self._quarantine(message, exc)
+                    continue
+                await self._dispatch(event)
+                if lease.lost:
+                    # The new owner publishes this row. mark_published would no-op anyway.
+                    break
+                await self._finish_claim(message.id, token)
+        finally:
+            keeper.cancel()
+            await asyncio.gather(keeper, return_exceptions=True)
+
+    async def _keep_lease(self, lease: _Lease) -> None:
+        while True:
+            await self._sleep(self._renew_seconds)
+            try:
+                async with self._uow_factory() as uow:
+                    state = await uow.outbox.renew(
+                        token=lease.token,
+                        now=self._clock.now(),
+                        message_ids=lease.message_ids,
+                    )
+                    await uow.commit()
+            except Exception:
+                log.exception("outbox_lease_renew_failed token=%s", lease.token)
+                continue
+            if state == LEASE_LOST:
+                lease.lost = True
+                self._metrics.outbox_lease_lost()
+                log.warning("outbox_lease_lost token=%s", lease.token)
+                return
+            if state == LEASE_IDLE:
+                return
+
+    async def _record_backlog(self) -> None:
+        now = self._clock.now()
+        try:
+            async with self._uow_factory() as uow:
+                stats = await uow.outbox.stats(claimed_since=now - self._claim_timeout)
+        except Exception:
+            log.exception("outbox_backlog_failed")
+            return
+        backlog = outbox_backlog(stats, now=now)
+        self._metrics.outbox_backlog(backlog.unpublished, backlog.oldest_unpublished_age_seconds)
 
     async def _finish_claim(self, message_id: int, claim_token: str) -> None:
         try:

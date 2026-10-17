@@ -19,6 +19,7 @@ from catalogguard.domain.models import (
     RecentInteraction,
     Store,
     StoreListing,
+    StoreListingRevision,
 )
 
 
@@ -40,6 +41,10 @@ class Metrics(Protocol):
     def dead_letter(self, handler: str) -> None: ...
 
     def drain_failure(self) -> None: ...
+
+    def outbox_lease_lost(self) -> None: ...
+
+    def outbox_backlog(self, unpublished: int, oldest_age_seconds: int | None) -> None: ...
 
     def handler_retry(self, handler: str) -> None: ...
 
@@ -104,6 +109,18 @@ class OutboxMessage:
     claim_token: str | None = None
 
 
+LEASE_RENEWED = "renewed"
+LEASE_IDLE = "idle"
+LEASE_LOST = "lost"
+
+
+@dataclass(frozen=True)
+class OutboxStats:
+    unpublished: int
+    claimed: int
+    oldest_created_at: datetime | None
+
+
 class OutboxRepository(Protocol):
     async def add(self, event: DomainEvent) -> None: ...
 
@@ -119,6 +136,12 @@ class OutboxRepository(Protocol):
     async def mark_published(
         self, message_id: int, *, when: datetime, claim_token: str
     ) -> None: ...
+
+    async def renew(self, *, token: str, now: datetime, message_ids: list[int]) -> str:
+        """LEASE_RENEWED, LEASE_IDLE, or LEASE_LOST. Lost wins over renewed."""
+        ...
+
+    async def stats(self, *, claimed_since: datetime) -> OutboxStats: ...
 
 
 class ProcessedEventRepository(Protocol):
@@ -161,6 +184,16 @@ class StoreListingRepository(Protocol):
     async def add(self, listing: StoreListing) -> None: ...
 
     async def compare_and_set(self, *, expected_version: int, listing: StoreListing) -> bool: ...
+
+
+class StoreListingRevisionRepository(Protocol):
+    async def add(self, revision: StoreListingRevision) -> None: ...
+
+    async def get(self, sku: str, store_id: str, version: int) -> StoreListingRevision | None: ...
+
+    async def list(
+        self, *, sku: str, store_id: str, limit: int, offset: int
+    ) -> list[StoreListingRevision]: ...
 
 
 class LlmUsageRepository(Protocol):
@@ -241,6 +274,7 @@ class UnitOfWork(Protocol):
     cooldowns: CooldownRepository
     drafts: ListingDraftRepository
     live_listings: StoreListingRepository
+    listing_revisions: StoreListingRevisionRepository
     usage: LlmUsageRepository
     emails: EmailDraftRepository
     suppressions: EmailSuppressionRepository

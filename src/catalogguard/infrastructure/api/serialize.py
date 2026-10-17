@@ -11,6 +11,7 @@ from catalogguard.domain.models import (
     Product,
     Store,
     StoreListing,
+    StoreListingRevision,
 )
 
 
@@ -88,6 +89,22 @@ def store_listing_out(listing: StoreListing) -> dict[str, object]:
         "meta_description": listing.meta_description,
         "published_draft_id": listing.published_draft_id,
         "published_at": listing.published_at.isoformat(),
+    }
+
+
+def listing_revision_out(revision: StoreListingRevision) -> dict[str, object]:
+    return {
+        "id": revision.id,
+        "sku": revision.sku,
+        "store_id": revision.store_id,
+        "version": revision.version,
+        "published_draft_id": revision.published_draft_id,
+        "title": revision.title,
+        "short_description": revision.short_description,
+        "long_description": revision.long_description,
+        "meta_title": revision.meta_title,
+        "meta_description": revision.meta_description,
+        "published_at": revision.published_at.isoformat(),
     }
 
 

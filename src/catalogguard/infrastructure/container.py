@@ -15,7 +15,7 @@ from catalogguard.application.handlers import (
 from catalogguard.application.inventory import InventoryService
 from catalogguard.application.listing import ListingService
 from catalogguard.application.ports import Clock, LLMProvider, Metrics, UnitOfWorkFactory
-from catalogguard.application.queries import DeadLetterService
+from catalogguard.application.queries import DeadLetterService, OutboxSummaryService
 from catalogguard.application.redrive import DeadLetterRedriveService
 from catalogguard.application.thresholds import ThresholdService
 from catalogguard.infrastructure.clock import SystemClock
@@ -45,6 +45,7 @@ class Container:
     handoffs: EmailHandoffService
     dead_letters: DeadLetterService
     redrives: DeadLetterRedriveService
+    outbox: OutboxSummaryService
 
 
 @dataclass
@@ -105,6 +106,12 @@ def build_runtime(
         raise RuntimeError("Retry counts must be at least 1")
     if settings.event_dispatch not in {"inline", "async"}:
         raise RuntimeError("EVENT_DISPATCH must be inline or async")
+    if not 0 < settings.outbox_lease_renew_seconds < settings.outbox_claim_timeout_seconds:
+        raise RuntimeError(
+            "OUTBOX_LEASE_RENEW_SECONDS must be greater than 0 and less than "
+            f"OUTBOX_CLAIM_TIMEOUT_SECONDS (got {settings.outbox_lease_renew_seconds} "
+            f"and {settings.outbox_claim_timeout_seconds})"
+        )
     prompts_path = settings.prompts_path()
     if not prompts_path.is_dir():
         raise RuntimeError(f"Prompts directory not found: {prompts_path}")
@@ -131,6 +138,7 @@ def build_runtime(
         backoff_seconds=settings.retry_backoff_seconds,
         mode=settings.event_dispatch,
         claim_timeout_seconds=settings.outbox_claim_timeout_seconds,
+        lease_renew_seconds=settings.outbox_lease_renew_seconds,
     )
     products = ProductService(uow_factory, clock)
     stores = StoreService(uow_factory, clock)
@@ -177,6 +185,12 @@ def build_runtime(
         suppressions=EmailSuppressionService(uow_factory, clock),
         handoffs=build_handoff_service(settings, uow_factory, clock=clock, metrics=metrics),
         dead_letters=DeadLetterService(uow_factory),
+        outbox=OutboxSummaryService(
+            uow_factory,
+            clock=clock,
+            metrics=metrics,
+            claim_timeout_seconds=settings.outbox_claim_timeout_seconds,
+        ),
         redrives=DeadLetterRedriveService(
             uow_factory,
             handlers=bus,

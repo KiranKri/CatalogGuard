@@ -142,6 +142,27 @@ class PublishListing(BaseModel):
     expected_version: int = Field(ge=0)
 
 
+class ListingRollback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision_version: int = Field(ge=1)
+    expected_version: int = Field(ge=0)
+
+
+class StoreListingRevisionResponse(BaseModel):
+    id: str
+    sku: str
+    store_id: str
+    version: int
+    published_draft_id: str
+    title: str
+    short_description: str
+    long_description: str
+    meta_title: str
+    meta_description: str
+    published_at: str
+
+
 class StoreListingResponse(BaseModel):
     sku: str
     store_id: str
@@ -224,6 +245,12 @@ class DeadLetterResponse(BaseModel):
     last_redriven_at: str | None
 
 
+class OutboxSummaryResponse(BaseModel):
+    unpublished: int
+    claimed: int
+    oldest_unpublished_age_seconds: int | None
+
+
 class DeadLetterRedriveResponse(BaseModel):
     dead_letter_id: str
     handler: str
@@ -252,6 +279,12 @@ class InventoryPage(BaseModel):
 
 class ListingDraftPage(BaseModel):
     items: list[ListingDraftResponse]
+    limit: int
+    offset: int
+
+
+class StoreListingRevisionPage(BaseModel):
+    items: list[StoreListingRevisionResponse]
     limit: int
     offset: int
 

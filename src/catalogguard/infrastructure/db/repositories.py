@@ -6,7 +6,13 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from catalogguard.application.ports import OutboxMessage
+from catalogguard.application.ports import (
+    LEASE_IDLE,
+    LEASE_LOST,
+    LEASE_RENEWED,
+    OutboxMessage,
+    OutboxStats,
+)
 from catalogguard.domain.errors import ConflictError, NotFoundError, OptimisticConflictError
 from catalogguard.domain.events import DomainEvent
 from catalogguard.domain.models import (
@@ -23,6 +29,7 @@ from catalogguard.domain.models import (
     RecentInteraction,
     Store,
     StoreListing,
+    StoreListingRevision,
 )
 from catalogguard.infrastructure.db.orm import (
     CooldownORM,
@@ -40,6 +47,7 @@ from catalogguard.infrastructure.db.orm import (
     ProductORM,
     RecentInteractionORM,
     StoreListingORM,
+    StoreListingRevisionORM,
     StoreORM,
 )
 from catalogguard.infrastructure.events.serialize import dump_event
@@ -411,6 +419,56 @@ class OutboxRepository:
         )
         await self._session.execute(stmt)
 
+    async def renew(self, *, token: str, now: datetime, message_ids: list[int]) -> str:
+        """Refresh a live lease.
+
+        lost:    a still-unpublished row from the batch has a null or different token.
+                 Checked first, so a partly stolen batch is not renewed or worked on.
+        renewed: rows still held under this token, now with claimed_at = now.
+        idle:    nothing left under this token. The normal end of a batch.
+        Published rows are never touched.
+        """
+
+        if message_ids:
+            stolen = await self._session.scalar(
+                select(func.count())
+                .select_from(OutboxORM)
+                .where(
+                    OutboxORM.id.in_(message_ids),
+                    OutboxORM.published_at.is_(None),
+                    or_(OutboxORM.claim_token.is_(None), OutboxORM.claim_token != token),
+                )
+            )
+            if stolen:
+                return LEASE_LOST
+        result = await self._session.execute(
+            update(OutboxORM)
+            .where(OutboxORM.published_at.is_(None), OutboxORM.claim_token == token)
+            .values(claimed_at=now)
+        )
+        return LEASE_RENEWED if result.rowcount else LEASE_IDLE
+
+    async def stats(self, *, claimed_since: datetime) -> OutboxStats:
+        pending = OutboxORM.published_at.is_(None)
+        unpublished = await self._session.scalar(
+            select(func.count()).select_from(OutboxORM).where(pending)
+        )
+        claimed = await self._session.scalar(
+            select(func.count())
+            .select_from(OutboxORM)
+            .where(
+                pending,
+                OutboxORM.claimed_at.is_not(None),
+                OutboxORM.claimed_at >= claimed_since,
+            )
+        )
+        oldest = await self._session.scalar(select(func.min(OutboxORM.created_at)).where(pending))
+        return OutboxStats(
+            unpublished=int(unpublished or 0),
+            claimed=int(claimed or 0),
+            oldest_created_at=None if oldest is None else _as_utc(oldest),
+        )
+
 
 class ProcessedEventRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -604,6 +662,71 @@ class StoreListingRepository:
         )
         result = await self._session.execute(stmt)
         return result.rowcount == 1
+
+
+def _listing_revision(row: StoreListingRevisionORM) -> StoreListingRevision:
+    return StoreListingRevision(
+        id=row.id,
+        sku=row.sku,
+        store_id=row.store_id,
+        version=row.version,
+        published_draft_id=row.published_draft_id,
+        title=row.title,
+        short_description=row.short_description,
+        long_description=row.long_description,
+        meta_title=row.meta_title,
+        meta_description=row.meta_description,
+        published_at=_as_utc(row.published_at),
+    )
+
+
+class StoreListingRevisionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(self, revision: StoreListingRevision) -> None:
+        await _savepoint_add(
+            self._session,
+            StoreListingRevisionORM(
+                id=revision.id,
+                sku=revision.sku,
+                store_id=revision.store_id,
+                version=revision.version,
+                published_draft_id=revision.published_draft_id,
+                title=revision.title,
+                short_description=revision.short_description,
+                long_description=revision.long_description,
+                meta_title=revision.meta_title,
+                meta_description=revision.meta_description,
+                published_at=revision.published_at,
+            ),
+            ConflictError("A revision already exists for that live listing version"),
+        )
+
+    async def get(self, sku: str, store_id: str, version: int) -> StoreListingRevision | None:
+        stmt = select(StoreListingRevisionORM).where(
+            StoreListingRevisionORM.sku == sku,
+            StoreListingRevisionORM.store_id == store_id,
+            StoreListingRevisionORM.version == version,
+        )
+        row = await self._session.scalar(stmt)
+        return None if row is None else _listing_revision(row)
+
+    async def list(
+        self, *, sku: str, store_id: str, limit: int, offset: int
+    ) -> list[StoreListingRevision]:
+        stmt = (
+            select(StoreListingRevisionORM)
+            .where(
+                StoreListingRevisionORM.sku == sku,
+                StoreListingRevisionORM.store_id == store_id,
+            )
+            .order_by(StoreListingRevisionORM.version.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = (await self._session.scalars(stmt)).all()
+        return [_listing_revision(row) for row in rows]
 
 
 class LlmUsageRepository:

@@ -26,6 +26,8 @@ from catalogguard.infrastructure.api.schemas import (
     InventoryUpsert,
     ListingDraftPage,
     ListingDraftResponse,
+    ListingRollback,
+    OutboxSummaryResponse,
     ProductCreate,
     ProductPage,
     ProductResponse,
@@ -33,6 +35,7 @@ from catalogguard.infrastructure.api.schemas import (
     PublishListing,
     StoreCreate,
     StoreListingResponse,
+    StoreListingRevisionPage,
     StorePage,
     StoreResponse,
     ThresholdResponse,
@@ -43,6 +46,7 @@ from catalogguard.infrastructure.api.serialize import (
     email_out,
     handoff_out,
     inventory_out,
+    listing_revision_out,
     page,
     product_out,
     redrive_out,
@@ -311,6 +315,50 @@ async def get_live_listing(sku: str, store_id: str, request: Request) -> dict[st
     return store_listing_out(listing)
 
 
+@router.get(
+    "/listings/{sku}/stores/{store_id}/revisions",
+    response_model=StoreListingRevisionPage,
+    tags=["listings"],
+)
+async def list_listing_revisions(
+    sku: str,
+    store_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> dict[str, object]:
+    rows = await _container(request).listings.revisions(
+        sku=sku,
+        store_id=store_id,
+        limit=limit,
+        offset=offset,
+    )
+    return page([listing_revision_out(item) for item in rows], limit=limit, offset=offset)
+
+
+@router.post(
+    "/listings/{sku}/stores/{store_id}/rollback",
+    response_model=StoreListingResponse,
+    tags=["listings"],
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def rollback_listing(
+    sku: str,
+    store_id: str,
+    body: ListingRollback,
+    request: Request,
+) -> dict[str, object]:
+    """Republish an earlier revision's draft through the normal publish step."""
+
+    listing = await _container(request).listings.rollback(
+        sku=sku,
+        store_id=store_id,
+        revision_version=body.revision_version,
+        expected_version=body.expected_version,
+    )
+    return store_listing_out(listing)
+
+
 @router.get("/listings/drafts", response_model=ListingDraftPage, tags=["listings"])
 async def list_listing_drafts(
     request: Request,
@@ -403,6 +451,18 @@ async def list_dead_letters(
 ) -> dict[str, object]:
     rows = await _container(request).dead_letters.list_with_redrives(limit=limit, offset=offset)
     return page([dead_letter_out(item) for item in rows], limit=limit, offset=offset)
+
+
+@router.get("/outbox/summary", response_model=OutboxSummaryResponse, tags=["ops"])
+async def outbox_summary(request: Request) -> dict[str, object]:
+    """Backlog read from the database. Counts only; no event payloads."""
+
+    backlog = await _container(request).outbox.summary()
+    return {
+        "unpublished": backlog.unpublished,
+        "claimed": backlog.claimed,
+        "oldest_unpublished_age_seconds": backlog.oldest_unpublished_age_seconds,
+    }
 
 
 @router.post(

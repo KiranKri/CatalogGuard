@@ -19,7 +19,7 @@ from catalogguard.domain.errors import (
     NotFoundError,
     OptimisticConflictError,
 )
-from catalogguard.domain.models import ListingDraft, StoreListing
+from catalogguard.domain.models import ListingDraft, StoreListing, StoreListingRevision
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +205,22 @@ class ListingService:
                         "Live listing version does not match",
                         current_version=latest.version if latest is not None else 0,
                     )
+            # History records the stripped text just stored live, in the same transaction.
+            await uow.listing_revisions.add(
+                StoreListingRevision(
+                    id=str(uuid4()),
+                    sku=saved.sku,
+                    store_id=saved.store_id,
+                    version=saved.version,
+                    published_draft_id=saved.published_draft_id,
+                    title=saved.title,
+                    short_description=saved.short_description,
+                    long_description=saved.long_description,
+                    meta_title=saved.meta_title,
+                    meta_description=saved.meta_description,
+                    published_at=saved.published_at,
+                )
+            )
             if draft.status != "published":
                 await uow.drafts.set_status(draft.id, "published")
             await uow.commit()
@@ -216,6 +232,40 @@ class ListingService:
             saved.published_draft_id,
         )
         return saved
+
+    async def rollback(
+        self,
+        *,
+        sku: str,
+        store_id: str,
+        revision_version: int,
+        expected_version: int,
+    ) -> StoreListing:
+        """Republish the draft behind an earlier live version, through `publish`."""
+
+        async with self._uow_factory() as uow:
+            current = await uow.live_listings.get(sku, store_id)
+            if current is None:
+                raise NotFoundError(f"No live listing for {sku} at {store_id}")
+            revision = await uow.listing_revisions.get(sku, store_id, revision_version)
+            if revision is None:
+                raise NotFoundError(
+                    f"No revision {revision_version} for the {sku} listing at {store_id}"
+                )
+        if revision.version == current.version:
+            raise ConflictError("That revision is already live")
+        return await self.publish(revision.published_draft_id, expected_version)
+
+    async def revisions(
+        self, *, sku: str, store_id: str, limit: int, offset: int
+    ) -> list[StoreListingRevision]:
+        async with self._uow_factory() as uow:
+            return await uow.listing_revisions.list(
+                sku=sku,
+                store_id=store_id,
+                limit=limit,
+                offset=offset,
+            )
 
     async def get_live(self, sku: str, store_id: str) -> StoreListing:
         async with self._uow_factory() as uow:

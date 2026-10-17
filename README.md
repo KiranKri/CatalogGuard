@@ -58,7 +58,19 @@ sequenceDiagram
 
 `EVENT_DISPATCH=inline` (the default) finishes that drain before the HTTP response returns, so a follow-up read sees the drafts. `EVENT_DISPATCH=async` schedules the drain on a background task in the same process. The outbox row is committed either way.
 
-Listing rewrites are store-scoped. The handler inserts a `ListingDraft`. It does not write `Product` SEO fields. An operator publishes a ready draft with `POST /api/v1/listings/drafts/{id}/publish`. That writes `store_listings` for the SKU and store. A draft with status `validation_failed` is rejected. Publishing the same draft again returns the current live row. Replacing it requires the live row's `expected_version`.
+Listing rewrites are store-scoped. The handler inserts a `ListingDraft`. It does not write `Product` SEO fields. An operator publishes a ready draft with `POST /api/v1/listings/drafts/{id}/publish`. That writes `store_listings` for the SKU and store. A draft with status `validation_failed` is rejected. Publishing the same draft again with the live row's `expected_version` returns the current live row without a new version. With a different `expected_version` it is 409. Replacing it requires the live row's `expected_version`.
+
+Every publish that stores a new live version also appends a row to `store_listing_revisions` in the same transaction. That row holds the stripped, customer-facing text that just went live, never the draft markers. `GET /api/v1/listings/{sku}/stores/{store_id}/revisions` lists them, newest version first.
+
+`POST /api/v1/listings/{sku}/stores/{store_id}/rollback` with `{"revision_version": 1, "expected_version": 2}` republishes the draft behind that revision through the same publish step:
+
+- The live version goes up, the text is stripped again, product SEO is untouched, and a new revision records it.
+- If the revision is already live, it is 409 `That revision is already live`.
+- A stale `expected_version` is 409 `optimistic_conflict`.
+- A draft that no longer matches the product's attributes is 409 `conflict`, and the live row does not change.
+- If there is no live row or no such revision, it is 404.
+
+There is no unpublish and no delete of revisions. History starts with this feature: a listing published before revision `5751f906cab6` has a live row and no history until its next publish. Nothing is backfilled.
 
 The email handler inserts one `EmailDraft` with status `queued`, including `quantity_as_of`. A quantity of 0 does not queue an "act now" draft. A downstream mailer owns delivery and must read stock again before sending, because the queued number can go stale.
 
@@ -95,7 +107,7 @@ Suppressions are opaque customer ids (`^[A-Za-z0-9_.:-]{1,64}$`, so an email add
 
 The worker logs `email_handoff_recorded` with the draft id, SKU, store, status, remaining recipient count, and suppressed count. It never logs the ids. It increments `catalogguard_email_handoffs_total{result}` once per new decision (`handed_off`, `suppressed`, `expired`). That counter lives in the worker process, which exits after one batch, so the API's `/metrics` does not show it. Read the JSON summary that the worker prints as its last line, or count `email_handoffs` rows.
 
-On SQLite the worker creates missing tables first, like the API. On Postgres it relies on Alembic, so run `make migrate` first.
+On SQLite the worker creates missing tables first, like the API. On Postgres it relies on Alembic, so run `make migrate` first. The drain worker (`make drain`, below) follows the same rule.
 
 ### Listing guardrail
 
@@ -242,6 +254,9 @@ A suppression added after a draft was already decided does not change that decis
 | GET | `/api/v1/listings/drafts` | Listing drafts |
 | POST | `/api/v1/listings/drafts/{id}/publish` | Copy a ready draft onto the live store listing. `expected_version` 0 creates it |
 | GET | `/api/v1/listings/{sku}/stores/{store_id}` | Live store listing |
+| GET | `/api/v1/listings/{sku}/stores/{store_id}/revisions` | Live listing history, newest version first. Paginated |
+| POST | `/api/v1/listings/{sku}/stores/{store_id}/rollback` | Republish an earlier revision through publish. Body `revision_version`, `expected_version` |
+| GET | `/api/v1/outbox/summary` | Unpublished rows, live leases, and the oldest unpublished age in seconds |
 | GET | `/api/v1/email-drafts` | Queued email drafts |
 | POST/GET | `/api/v1/email-suppressions` | Suppress an opaque customer id (`customer_id`, `reason`). Duplicate is 409. GET is paginated |
 | GET | `/api/v1/email-handoffs` | Handoff decisions. Filters `status`, `sku`, `store_id`, plus `limit` and `offset`. There is no send route |
@@ -258,15 +273,35 @@ Omit `threshold_override` to leave the current override alone. Send `null` to cl
 
 ## Configuration
 
-See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline dispatch, threshold 5, cooldown 24 hours, 24 LLM calls per SKU per UTC day, outbox lease 300 seconds, three handler attempts, three LLM transport attempts, email handoff batch 50, and handoff max age 72 hours.
+See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline dispatch, threshold 5, cooldown 24 hours, 24 LLM calls per SKU per UTC day, outbox lease 300 seconds renewed every 60 seconds while a drain is alive, three handler attempts, three LLM transport attempts, email handoff batch 50, and handoff max age 72 hours.
 
 `LLM_PROVIDER=openai` without `LLM_API_KEY` or `XAI_API_KEY` fails at startup.
 
 ## Production notes
 
-**Scaling.** SQLite is the dev default. Do not run two API processes against one SQLite file. Postgres is the database when more than one process drains the outbox. The drain leases each row before dispatch. On Postgres that lease is `SELECT … FOR UPDATE SKIP LOCKED`, and `mark_published` only succeeds for the token that holds the lease. A lease older than `OUTBOX_CLAIM_TIMEOUT_SECONDS` can be taken again. The low-stock event id is derived from the inventory event id, so two drainers cannot insert two downstream events for one write. The lease is not renewed while a slow model call is in flight, so a batch that outlives the timeout can be claimed twice and the handlers must stay idempotent. The asyncio lock only stops a single process from draining itself twice. Listing and email workers that should run outside the API still belong on Kafka.
+**Scaling.** SQLite is the dev default. Do not run two writers against one SQLite file. That means two API processes, or the API plus `make drain`. Postgres is the database when more than one process drains the outbox.
 
-Inline dispatch holds a process-wide lock until the outbox is empty. A stock update for an unrelated SKU waits behind an in-flight model call. That is acceptable for the demo and a poor fit for a burst of store updates. `EVENT_DISPATCH=async` returns after scheduling the drain. Compose still uses inline so the curl walkthrough can read drafts immediately.
+- **Leases.** The drain leases each batch before dispatch. On Postgres that lease is `SELECT … FOR UPDATE SKIP LOCKED`, and `mark_published` only succeeds for the token that holds the lease. A lease older than `OUTBOX_CLAIM_TIMEOUT_SECONDS` (300) can be taken again. The low-stock event id is derived from the inventory event id, so two drainers cannot insert two downstream events for one write.
+- **Renewal.** While a batch runs, a keeper task renews its lease every `OUTBOX_LEASE_RENEW_SECONDS` (60), so a slow model call no longer lets another worker take rows that are still being worked on. The renew interval must be greater than 0 and less than the claim timeout, or the API and the drain worker refuse to start.
+- **Idle versus lost.** A renewal that finds nothing left under its token is **idle**, the normal end of a batch, and the keeper stops quietly. A renewal that finds an unpublished row from its batch under another token, or under none, is **lost**. The keeper then counts `catalogguard_outbox_lease_lost_total` once and logs `outbox_lease_lost` with the token. This worker dispatches nothing more from that batch and does not mark the in-flight row published. A lost lease is not a drain failure and writes no dead letter. Handlers stay idempotent, so the new owner can run them again. A lease left to expire without renewal is still reclaimable after the timeout.
+- **In one process.** The asyncio lock only stops a single process from draining itself twice. Listing and email workers that should run outside the API still belong on Kafka.
+
+**Draining without the API.** `python -m catalogguard.drain` (or `make drain`) builds the same handlers and bus as the API, drains inline until no claimable row is left, prints `{"unpublished_before": N, "unpublished_after": M}` as its last stdout line, and exits. It always drains inline, even when `EVENT_DISPATCH=async`. It is not a daemon; a scheduler can call it again. Use it when the API runs `EVENT_DISPATCH=async`, or after a crash left unpublished rows. On SQLite it creates missing tables first. On Postgres it relies on Alembic. Compose stays on inline dispatch.
+
+**Backlog.** `GET /api/v1/outbox/summary` returns:
+
+- `unpublished`: rows not yet published.
+- `claimed`: unpublished rows whose lease is still inside the timeout. An expired lease counts as unpublished and not claimed.
+- `oldest_unpublished_age_seconds`: whole seconds since the oldest unpublished row was created, or `null` when there are none.
+
+It reads the database with the injected clock, so it does not depend on which process drained last. The gauges `catalogguard_outbox_unpublished` and `catalogguard_outbox_oldest_unpublished_seconds` (0 when nothing is pending) are set at the end of each drain in the API process and whenever the summary is read. The drain worker's gauges disappear when that process exits, so use the summary endpoint for the current backlog.
+
+```powershell
+make drain
+curl.exe -s http://127.0.0.1:8000/api/v1/outbox/summary
+```
+
+Inline dispatch holds a process-wide lock until the outbox is empty. A stock update for an unrelated SKU waits behind an in-flight model call. That is acceptable for the demo and a poor fit for a burst of store updates. `EVENT_DISPATCH=async` returns after scheduling the drain, and `make drain` can finish what a background drain left behind. Compose still uses inline so the curl walkthrough can read drafts immediately.
 
 Inline dispatch keeps the request open for the LLM call. That is the right demo default and a poor fit once rewrite latency matters. `EVENT_DISPATCH=async` only moves the drain onto a background task. It does not make the drain safe across instances.
 
@@ -302,7 +337,7 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 
 **Kafka and more than one instance.** Keep writing the outbox in the state-change transaction. The API drain already claims rows. The next move is a publisher that produces leased rows to `catalogguard.events` with key `{sku}|{store_id}`, then marks `published_at`. Run listing rewrite and email drafts as consumers when that work should leave the API process. The skeleton is `KafkaEventBus` in `infrastructure/events/kafka.py`. It raises if called. The swap is described in `adr/0001-kafka-event-bus.md`. SQS is the same shape with a visibility timeout and a dead-letter queue.
 
-**Migrations.** Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. Revision `c81f0f63dcdc` (`dead_letter_redrive`) adds `dead_letter_redrives` on top of that. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
+**Migrations.** Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. Revision `c81f0f63dcdc` (`dead_letter_redrive`) adds `dead_letter_redrives` on top of that. Revision `5751f906cab6` (`store_listing_revisions`) adds `store_listing_revisions` on top of that. The lease renewal needs no schema change. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
 
 ## Tests
 
@@ -318,6 +353,24 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/dead-letters/<dead-letter-id>/
 - threshold recovery that drains into both drafts without a handoff
 - a drain failure after a successful redrive
 - a failed attempt, truncated to 2000 characters, followed by a successful retry
+
+`tests/integration/test_outbox_lease.py` covers the outbox lease, the drain worker, and the backlog:
+
+- renewal, idle after publish, and a stolen lease that is lost
+- the keeper renewing during an in-flight handler
+- a lost batch that stops without publishing or dead-lettering
+- the async API leaving rows that `python -m catalogguard.drain` publishes
+- the inline API still having drafts when the PUT returns
+- the drain command on a fresh database
+- the summary counts and gauges
+- the startup check on the renew interval
+
+`tests/integration/test_listing_revisions.py` covers listing history:
+
+- stripped revisions on publish, and no revision on a repeat publish
+- rollback through publish
+- rolling back to the live version, with a stale version, or to a draft that no longer matches the product
+- the 404 cases
 
 `make lint` runs Ruff.
 

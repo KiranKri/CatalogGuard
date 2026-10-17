@@ -1,4 +1,4 @@
-.PHONY: run test lint seed migrate handoff
+.PHONY: run test lint seed migrate handoff drain
 
 ifeq ($(OS),Windows_NT)
   VENV_PY := .venv/Scripts/python.exe
@@ -30,3 +30,6 @@ migrate:
 
 handoff:
 	$(PYTHON) -m catalogguard.mailer
+
+drain:
+	$(PYTHON) -m catalogguard.drain
