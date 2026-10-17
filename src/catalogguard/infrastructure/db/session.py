@@ -1,4 +1,5 @@
-"""Engine and session factory. SQLite enables foreign keys and WAL."""
+"""Engine and session factory. SQLite enables foreign keys and WAL, and
+SQLAlchemy, not the driver, emits BEGIN so savepoints nest in the unit of work."""
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -30,6 +31,21 @@ def create_db_engine(settings: Settings) -> AsyncEngine:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.fetchone()
             cursor.close()
+            # The sqlite3 driver's legacy mode skips BEGIN before SELECT and
+            # SAVEPOINT, so a savepoint could open, then commit, its own
+            # transaction. Turn that off; _sqlite_begin issues BEGIN instead.
+            # The aiosqlite adapter's setter applies this to the underlying
+            # sqlite3 connection on its worker thread.
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(engine.sync_engine, "begin")
+        def _sqlite_begin(connection) -> None:
+            # IMMEDIATE takes the write lock up front. A deferred BEGIN would hold
+            # a read snapshot, and a unit of work that reads, then writes after
+            # another one committed, would fail with "database is locked" instead
+            # of waiting busy_timeout for its turn.
+            if not connection.connection.driver_connection.in_transaction:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
 
     return engine
 

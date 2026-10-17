@@ -175,6 +175,9 @@ async def test_a_redelivered_event_is_not_stored_twice(harness) -> None:
     assert await _suppressed(client) == [row]
     assert await _last_triggered_at(app) == first_at
     assert len(await _drafts(client)) == 1
+    # The processed mark rolled back with the failed insert, so a retry is not skipped.
+    async with app.state.uow_factory() as uow:
+        assert not await uow.processed.seen(event.event_id, "threshold_evaluation")
 
 
 async def test_listing_filters_by_store_and_sku_newest_first(harness) -> None:

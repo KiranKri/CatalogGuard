@@ -316,7 +316,7 @@ See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline di
 
 ## Production notes
 
-**Scaling.** SQLite is the dev default. Do not run two writers against one SQLite file. That means two API processes, or the API plus `make drain`. Postgres is the database when more than one process drains the outbox.
+**Scaling.** SQLite is the dev default. Do not run two writers against one SQLite file. On SQLite, SQLAlchemy issues `BEGIN IMMEDIATE` itself, so savepoints take part in the unit-of-work transaction and a failure rolls back the processed-event mark with the rest of the work. That means two API processes, or the API plus `make drain`. Postgres is the database when more than one process drains the outbox.
 
 - **Leases.** The drain leases each batch before dispatch. On Postgres that lease is `SELECT … FOR UPDATE SKIP LOCKED`, and `mark_published` only succeeds for the token that holds the lease. A lease older than `OUTBOX_CLAIM_TIMEOUT_SECONDS` (300) can be taken again. The low-stock event id is derived from the inventory event id, so two drainers cannot insert two downstream events for one write.
 - **Renewal.** While a batch runs, a keeper task renews its lease every `OUTBOX_LEASE_RENEW_SECONDS` (60), so a slow model call no longer lets another worker take rows that are still being worked on. The renew interval must be greater than 0 and less than the claim timeout, or the API and the drain worker refuse to start.
