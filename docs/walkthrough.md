@@ -87,7 +87,7 @@ What you should see:
 - Threshold sources: `global` 5 for the pack in New York, `sku` 8 for the wool blanket in New York, `sku_store` 3 for that blanket in Austin.
 - The PUT returns quantity 2, previous quantity 12, version 2, and echoes `X-Correlation-ID: walkthrough-1`.
 - One listing draft, `status` `ready`, `prompt_version` `listing_rewrite/v1`, `model` `stub-deterministic-v1`, empty `violations`. The title starts with `Fieldwork Supply Trailhead 28 Pack`. The product's live SEO fields are unchanged.
-- One email draft, `status` `queued`, subject `Only 2 left in Hudson Market — act now`, recipients `cus_1842` (`add_to_cart`), `cus_4410`, `cus_7781`, and `cus_9021`. Not `cus_1009`.
+- One email draft, `status` `queued`, subject `Only 2 left in Hudson Market — act now`, recipients `cus_1842` and `cus_7781` (`add_to_cart`) and `cus_4410` and `cus_9021` (`view`). Not `cus_1009`.
 - The second PUT returns the same body and `Idempotency-Replayed: true`. Draft counts stay at one.
 - `/metrics` includes `catalogguard_events_emitted_total`, `catalogguard_listing_rewrites_total`, and `catalogguard_llm_latency_seconds`.
 
@@ -106,7 +106,9 @@ curl.exe -s -X POST "http://127.0.0.1:8000/api/v1/listings/LANT-LED-01/stores/ny
 
 </details>
 
-If this database was already walked through, `expected_version` is no longer 1 and the pack may already be below the threshold. Either delete `catalogguard.db` and run `make seed` again, or read the version and cross again with a new idempotency key:
+If this database was already walked through, `expected_version` is no longer 1 and the pack may already be below the threshold. The simplest reset is to delete `catalogguard.db` and run `make seed` again.
+
+Restocking and crossing again on the same database does not create a new draft within 24 hours: the cooldown drops that second crossing and records it under `GET /api/v1/suppressed-crossings?store_id=nyc`. To repeat the crossing without reseeding, start the server with a short cooldown (for example `LOW_STOCK_COOLDOWN_SECONDS=1 make run`), then restock and cross again with new idempotency keys:
 
 ```bash
 curl -s -D - -X PUT "$B/api/v1/inventory/BKPK-28L-OLV/nyc" \
