@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Boots Compose and checks the core walkthrough. Does not claim a green run
-# until that run has been pasted back.
+# Boots Compose, checks the core walkthrough (crossing, drafts, idempotent replay),
+# runs the mailer once, and tears the stack down.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"

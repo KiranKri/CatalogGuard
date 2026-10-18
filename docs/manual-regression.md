@@ -1,8 +1,8 @@
 # CatalogGuard manual regression
 
-Follow this on Windows PowerShell 5.1 in `C:\Users\kiran\PycharmProjects\CatalogGuard`. The Python environment is `.venv` (Python 3.12). `make` uses that interpreter when it exists.
+Run this from the repository root in Windows PowerShell 5.1. The Python environment is `.venv` (Python 3.12). `make` uses that interpreter when it exists.
 
-This pass proves the demo on SQLite. Do not install Docker. Do not run `docker compose`. Do not set `LLM_PROVIDER=openai` and do not call a real model. Do not push, do not add a remote, and do not commit unless the user asks. Do not edit application code while testing. Stop the API process when you finish. Do not leave it running.
+This pass checks the demo on SQLite with the stub LLM. It needs no Docker and no API key: leave `LLM_PROVIDER` at `stub`. Do not edit application code while testing, and stop the API process when you finish.
 
 Record each step as pass or fail, with the status code and the field that was wrong. Stop the manual section on the first failed expectation and report it. The automated section can finish even if a later manual step fails, but say which step failed.
 
