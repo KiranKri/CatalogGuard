@@ -85,9 +85,10 @@ From the repository root. `uv` is optional. The Makefile uses `.venv` when it ex
 python3.12 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 make seed
-make run
-make test
+make run    # serves on http://127.0.0.1:8000; stop with Ctrl+C
 ```
+
+In another terminal, `make test` runs the suite and `make lint` runs Ruff.
 
 <details>
 <summary>Windows PowerShell</summary>
