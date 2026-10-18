@@ -1,6 +1,6 @@
 # CatalogGuard
 
-A stock write for one store commits the new quantity, its history row, its idempotency record, and its outbox event in one transaction, and every handler downstream of it is safe to run twice; a multi-store retail catalog is the domain those controls are wrapped around. When a SKU crosses below its threshold in a store, CatalogGuard stores a listing draft and queues an email draft, but it does not change live product SEO and it does not send email.
+CatalogGuard shows how to make a workflow that calls an AI model safe to retry, safe to crash, and safe on a budget. When a store's stock drops below its threshold, it stores a fact-checked listing draft and queues an email draft. Nothing goes live or gets sent without a separate decision.
 
 AI coding assistants wrote the code under the author's direction; the author set the rules each change had to meet and reviewed the result.
 
