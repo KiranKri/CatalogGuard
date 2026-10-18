@@ -8,7 +8,7 @@ See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline di
 
 ## Postgres with Compose
 
-```powershell
+```bash
 docker compose up --build
 ```
 
@@ -117,4 +117,4 @@ Keep writing the outbox in the state-change transaction. The API drain already c
 
 ## Migrations
 
-Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. Revision `15e685dc71f6` (`email_handoff`) adds `email_suppressions` and `email_handoffs` on top of the initial schema. Revision `c81f0f63dcdc` (`dead_letter_redrive`) adds `dead_letter_redrives` on top of that. Revision `5751f906cab6` (`store_listing_revisions`) adds `store_listing_revisions` on top of that. Revision `89e567ee29fd` (`inventory_changes`) adds `inventory_changes` on top of that. The lease renewal needs no schema change. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
+Local SQLite and the test suite create tables with `metadata.create_all` on startup. The API does that only when `DATABASE_URL` is SQLite. Postgres does not run `create_all`, so a new table or column has to be in an Alembic revision or it will be missing in Docker. Docker runs `python -m catalogguard.migrate` (`alembic upgrade head`) before the API listens. `make migrate` does the same against `DATABASE_URL`. Run that once per deploy, not inside every replica if more than one container starts together. The revisions, in order after the initial schema `0d865ba6ff4d`: `15e685dc71f6` (`email_suppressions`, `email_handoffs`), `c81f0f63dcdc` (`dead_letter_redrives`), `5751f906cab6` (`store_listing_revisions`), `89e567ee29fd` (`inventory_changes`), `b19fd5f52b4b` (`suppressed_crossings`), and `6e218e07a396` (`dead_letter_redrive_claims`). The lease renewal needs no schema change. A SQLite file created before `store_listings`, `llm_usage`, or `claimed_at` existed will not pick up those columns from `create_all`. Delete `catalogguard.db` and run `make seed`, or start from an empty database and run `make migrate`.
