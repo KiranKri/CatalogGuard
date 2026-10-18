@@ -1,0 +1,14 @@
+# gitleaks config: the default rules, plus an allowlist for demo idempotency keys.
+# The walkthrough docs and tests send headers such as "Idempotency-Key: walkthrough-bkpk-nyc-1",
+# which the generic-api-key rule reads as a secret. They are request labels, not credentials.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Demo idempotency keys in the walkthrough docs and tests"
+regexTarget = "secret"
+regexes = [
+    '''^walkthrough-[a-z0-9-]+$''',
+    '''^handoff-twice-\d+$''',
+]
