@@ -311,6 +311,10 @@ class DeadLetterRedriveClaimRepository(Protocol):
         """Move claimed_at to now only if it still equals expected."""
         ...
 
+    async def renew(self, dead_letter_id: str, *, expected: datetime, now: datetime) -> bool:
+        """Refresh claimed_at only if it still equals expected."""
+        ...
+
     async def release(self, dead_letter_id: str, claimed_at: datetime) -> None: ...
 
 

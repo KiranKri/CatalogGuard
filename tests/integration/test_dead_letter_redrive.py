@@ -605,7 +605,57 @@ async def test_an_overrun_attempt_does_not_release_the_claim_that_replaced_it(ha
     assert len(handled) == 1
 
 
+async def test_a_live_handler_renews_its_claim_before_the_timeout(harness) -> None:
+    client, app, letter_id, handled = await _threshold_letter(harness)
+    clock = app.state.clock
+    started = clock.now()
+    service = app.state.container.redrives
+    handler = app.state.bus.handler_for("InventoryChanged", "threshold_evaluation")
+    spy = handler.handle
+    parked = asyncio.Event()
+    sleeps = 0
+
+    async def renew_then_park(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            clock.advance(timedelta(seconds=seconds))
+            return
+        await parked.wait()
+
+    service._sleep = renew_then_park
+
+    async def wait_until_renewed(event) -> None:
+        for _ in range(50):
+            if await _claimed_at(app, letter_id) != started:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("claim was not renewed")
+        async with app.state.uow_factory() as uow:
+            assert not await uow.redrive_claims.take_over(
+                letter_id, expected=started, now=clock.now()
+            )
+        await spy(event)
+
+    handler.handle = wait_until_renewed
+    try:
+        finished = await _redrive(client, letter_id)
+    finally:
+        parked.set()
+        handler.handle = spy
+
+    assert finished.status_code == 200, finished.text
+    assert await _claimed_at(app, letter_id) is None
+    assert len(handled) == 1
+
+
 @pytest.mark.parametrize("timeout_seconds", [0, -1])
 async def test_claim_timeout_must_be_positive(harness, timeout_seconds: int) -> None:
     with pytest.raises(RuntimeError, match="REDRIVE_CLAIM_TIMEOUT_SECONDS"):
         await harness(redrive_claim_timeout_seconds=timeout_seconds)
+
+
+async def test_claim_renew_interval_must_be_shorter_than_the_timeout(harness) -> None:
+    with pytest.raises(RuntimeError, match="REDRIVE_CLAIM_RENEW_SECONDS"):
+        await harness(redrive_claim_renew_seconds=300)

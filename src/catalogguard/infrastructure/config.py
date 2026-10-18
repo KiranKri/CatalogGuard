@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     outbox_claim_timeout_seconds: int = 300
     outbox_lease_renew_seconds: int = 60
     redrive_claim_timeout_seconds: int = 300
+    redrive_claim_renew_seconds: int = 60
     event_dispatch: str = "inline"
     log_level: str = "INFO"
     seed_on_startup: bool = False

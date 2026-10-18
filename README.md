@@ -21,7 +21,7 @@ AI coding assistants wrote the code under the author's direction; the author set
 - Quantity is an absolute set with `expected_version`, because two writers must never both apply a delta. The loser gets 409 and `current_version`.
 - The outbox row commits in the same transaction as the stock change, so a crash cannot leave a new quantity with no event.
 - A crossing inside the cooldown is stored and dropped, not deferred, so a flapping count does not rewrite the listing on every wobble.
-- Low stock stores a draft. A store's live listing changes only when an operator publishes a draft, and the model path never writes the product's own SEO fields.
+- Low stock stores a draft. The email carries the urgency. The listing draft is a proposed refresh of the product story, and the model is not told the stock level, so it cannot invent scarcity. A store's live listing changes only when an operator publishes that draft, and the model path never writes the product's own SEO fields.
 - Every `[[key]]` must name a real attribute, with that attribute's value in the 48 characters before the marker. Uncited prose can still slip through.
 - The LLM cap is per SKU per UTC day, shared by every store, and counted before the provider call. There is no global budget.
 - SQLite is the default so the demo needs no Docker. Two processes against one SQLite file are not supported.
@@ -181,7 +181,7 @@ Drafts keep the markers. Publish copies the text onto `store_listings` with the 
 
 Each SKU may spend `LLM_DAILY_CAP_PER_SKU` generations per UTC day (default 24). `0` turns the cap off. The reservation is counted before the provider is called, including retries, so a failing call still spends budget. A manual rewrite over the cap returns 429 `llm_cost_limit`. The low-stock handler records a dead letter and still queues the email draft. The counter is `catalogguard_listing_rewrites_total{result="cost_limited"}`.
 
-The default provider is a deterministic stub (`stub-deterministic-v1`) so the service runs with no API key. Set `LLM_PROVIDER=openai` to call an OpenAI-compatible Chat Completions endpoint. The default base URL is SpaceXAI, `https://api.x.ai/v1`, model `grok-4.7`, using `response_format.type = json_schema`. Point `LLM_BASE_URL` at any compatible server. The key is `LLM_API_KEY` or `XAI_API_KEY`.
+The running default is a deterministic stub (`stub-deterministic-v1`), so the service and the tests need no API key. Set `LLM_PROVIDER=openai` to call any OpenAI-compatible Chat Completions server: set `LLM_BASE_URL` and `LLM_MODEL`. The configured example is xAI at `https://api.x.ai/v1`, model `grok-4.7` (the current Grok model on the xAI docs), using `response_format.type = json_schema`. SpaceXAI is the name for that endpoint. The key is `LLM_API_KEY` or `XAI_API_KEY`.
 
 ## Run locally
 
@@ -400,7 +400,7 @@ Inventory history (`GET /api/v1/inventory/{sku}/{store_id}/changes`) is append-o
 
 ## Configuration
 
-See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline dispatch, threshold 5, cooldown 24 hours, 24 LLM calls per SKU per UTC day, outbox lease 300 seconds renewed every 60 seconds while a drain is alive, redrive claim timeout 300 seconds, three handler attempts, three LLM transport attempts, email handoff batch 50, and handoff max age 72 hours.
+See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline dispatch, threshold 5, cooldown 24 hours, 24 LLM calls per SKU per UTC day, outbox lease 300 seconds renewed every 60 seconds while a drain is alive, redrive claim timeout 300 seconds renewed every 60 seconds while the handler runs, three handler attempts, three LLM transport attempts, email handoff batch 50, and handoff max age 72 hours.
 
 `LLM_PROVIDER=openai` without `LLM_API_KEY` or `XAI_API_KEY` fails at startup.
 
@@ -446,7 +446,7 @@ Inline dispatch keeps the request open for the LLM call. That is the right demo 
 - **Listing letters.** A listing redrive goes through the normal daily LLM cap. It spends one call when no draft exists yet for that trigger. It spends nothing, and returns the existing draft, when one does.
 - **Email letters.** A recovered email draft is `queued` like any other, and a sold-out event still queues none. Nothing is sent, and no handoff is recorded until the handoff worker runs.
 - **Refusals.** An `outbox_decode` letter returns 409 `Undecodable outbox rows cannot be redriven`, and the row is not put back on the outbox. A payload that no longer decodes, or a handler name that is not registered, is also 409. None of these refusals records an attempt.
-- **One in flight.** Before the handler runs, the redrive commits a row in `dead_letter_redrive_claims` in its own short transaction. A second request for the same letter, from this process or another, gets 409 `A redrive of this dead letter is already in progress` while that claim is younger than `REDRIVE_CLAIM_TIMEOUT_SECONDS` (default 300). It does not call the handler or record an attempt. A claim that old or older can be taken over with a compare-and-set on `claimed_at`. The success or failure row is written in the same transaction that releases the claim. The remaining hole: a handler that runs longer than the timeout, or a process that dies mid-handler, leaves a claim that a later request takes over, so the handler can run twice and spend a second LLM call. There is no renewal loop. Revision `6e218e07a396` adds the table.
+- **One in flight.** Before the handler runs, the redrive commits a row in `dead_letter_redrive_claims` in its own short transaction. A second request for the same letter, from this process or another, gets 409 `A redrive of this dead letter is already in progress` while that claim is younger than `REDRIVE_CLAIM_TIMEOUT_SECONDS` (default 300). It does not call the handler or record an attempt. A claim that old or older can be taken over with a compare-and-set on `claimed_at`. While the handler runs, a keeper refreshes that timestamp every `REDRIVE_CLAIM_RENEW_SECONDS` (default 60), the same idea as the outbox lease, so a slow call does not look idle. The renew interval must be greater than 0 and less than the claim timeout, or startup refuses. The success or failure row is written in the same transaction that releases the claim, and only if the claim is still this attempt's. The remaining hole is a process that dies mid-handler: nothing refreshes the claim, and a later request can take it over. Revision `6e218e07a396` adds the table.
 
 `catalogguard_dead_letter_redrives_total{result}` counts `succeeded`, `failed`, `rejected` (the refusals and unknown ids), `replayed`, and `in_progress` (a live claim held elsewhere). A redrive never increments `catalogguard_dead_letters_total`.
 
@@ -535,4 +535,4 @@ Authentication, email delivery (no SMTP), a UI, a Kafka client, multi-tenancy be
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT, on purpose. The engine is meant to be read, run, and built on. See [LICENSE](LICENSE).

@@ -17,8 +17,9 @@ in its own short transaction. That row is what another process sees: while it
 is younger than the claim timeout, a second request gets 409 and the handler is
 not called. An older claim is taken over with a compare-and-set on claimed_at.
 The success or failure row is written in the same transaction that releases the
-claim. A process that dies mid-handler leaves its claim until the timeout, so
-the handler can still run twice in that case. There is no renewal loop.
+claim. While the handler runs, a keeper refreshes claimed_at so a slow call
+does not look idle. A process that dies mid-handler leaves the claim until the
+timeout, and a later request can take it over.
 """
 
 import asyncio
@@ -51,6 +52,13 @@ IN_PROGRESS = "in_progress"
 _ERROR_LIMIT = 2000
 
 
+class _OwnedClaim:
+    """The claimed_at this attempt last wrote. The keeper moves it forward."""
+
+    def __init__(self, claimed_at: datetime) -> None:
+        self.claimed_at = claimed_at
+
+
 @dataclass(frozen=True)
 class RedriveResult:
     dead_letter_id: str
@@ -71,6 +79,7 @@ class DeadLetterRedriveService:
         metrics: Metrics,
         clock: Clock,
         claim_timeout_seconds: int,
+        claim_renew_seconds: int,
     ) -> None:
         self._uow_factory = uow_factory
         self._handlers = handlers
@@ -79,6 +88,8 @@ class DeadLetterRedriveService:
         self._metrics = metrics
         self._clock = clock
         self._claim_timeout = timedelta(seconds=claim_timeout_seconds)
+        self._renew_seconds = claim_renew_seconds
+        self._sleep = asyncio.sleep
         # One lock per letter id in this process, so a double click waits and then
         # replays instead of running the handler twice. Entries vanish when unused.
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -131,16 +142,25 @@ class DeadLetterRedriveService:
             self._outcome(dead_letter_id, letter, IN_PROGRESS)
             raise ConflictError("A redrive of this dead letter is already in progress")
 
+        owned = _OwnedClaim(claimed_at)
+        keeper = asyncio.create_task(self._keep_claim(letter.id, owned))
         try:
             await handler.handle(event)
         except Exception as exc:
+            failed: Exception | None = exc
+        else:
+            failed = None
+        finally:
+            keeper.cancel()
+            await asyncio.gather(keeper, return_exceptions=True)
+        if failed is not None:
             # CostLimitError, NotFoundError, MalformedLLMOutputError, and anything
             # else: record the attempt, then let the existing HTTP mapping answer.
-            message = str(exc) or exc.__class__.__name__
-            await self._record(letter.id, FAILED, message[:_ERROR_LIMIT], claimed_at)
+            message = str(failed) or failed.__class__.__name__
+            await self._record(letter.id, FAILED, message[:_ERROR_LIMIT], owned.claimed_at)
             self._outcome(dead_letter_id, letter, FAILED)
-            raise
-        redrive = await self._record(letter.id, SUCCEEDED, "", claimed_at)
+            raise failed
+        redrive = await self._record(letter.id, SUCCEEDED, "", owned.claimed_at)
         self._outcome(dead_letter_id, letter, SUCCEEDED)
         await self._drain_quietly()
         return RedriveResult(
@@ -168,6 +188,26 @@ class DeadLetterRedriveService:
                     return None
             await uow.commit()
         return now
+
+    async def _keep_claim(self, dead_letter_id: str, owned: _OwnedClaim) -> None:
+        """Refresh claimed_at until cancelled. Stop if another attempt took the row."""
+
+        while True:
+            await self._sleep(self._renew_seconds)
+            now = self._clock.now()
+            try:
+                async with self._uow_factory() as uow:
+                    still_ours = await uow.redrive_claims.renew(
+                        dead_letter_id, expected=owned.claimed_at, now=now
+                    )
+                    await uow.commit()
+            except Exception:
+                log.exception("redrive_claim_renew_failed letter=%s", dead_letter_id)
+                continue
+            if not still_ours:
+                log.warning("redrive_claim_lost letter=%s", dead_letter_id)
+                return
+            owned.claimed_at = now
 
     async def _record(
         self, dead_letter_id: str, status: str, error: str, claimed_at: datetime

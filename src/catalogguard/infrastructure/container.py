@@ -119,6 +119,13 @@ def build_runtime(
             "REDRIVE_CLAIM_TIMEOUT_SECONDS must be greater than 0 "
             f"(got {settings.redrive_claim_timeout_seconds})"
         )
+    if not 0 < settings.redrive_claim_renew_seconds < settings.redrive_claim_timeout_seconds:
+        raise RuntimeError(
+            "REDRIVE_CLAIM_RENEW_SECONDS must be greater than 0 and less than "
+            "REDRIVE_CLAIM_TIMEOUT_SECONDS "
+            f"(got {settings.redrive_claim_renew_seconds} "
+            f"and {settings.redrive_claim_timeout_seconds})"
+        )
     prompts_path = settings.prompts_path()
     if not prompts_path.is_dir():
         raise RuntimeError(f"Prompts directory not found: {prompts_path}")
@@ -210,6 +217,7 @@ def build_runtime(
             metrics=metrics,
             clock=clock,
             claim_timeout_seconds=settings.redrive_claim_timeout_seconds,
+            claim_renew_seconds=settings.redrive_claim_renew_seconds,
         ),
     )
     return Runtime(

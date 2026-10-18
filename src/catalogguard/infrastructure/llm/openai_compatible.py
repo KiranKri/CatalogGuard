@@ -1,7 +1,8 @@
 """OpenAI-compatible Chat Completions provider.
 
-Default base URL is SpaceXAI (https://api.x.ai/v1) and the default model is
-grok-4.7, from the current xAI docs. Any server that accepts
+When LLM_PROVIDER=openai, the example base URL is xAI at https://api.x.ai/v1
+(also called SpaceXAI) and the example model is grok-4.7, from the current
+xAI docs. Any server that accepts
 `POST /chat/completions` with `response_format.type = json_schema` works.
 Set LLM_BASE_URL and LLM_API_KEY (or XAI_API_KEY). The stub provider stays
 the default so the service boots with no key.

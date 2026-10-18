@@ -1242,6 +1242,14 @@ class DeadLetterRedriveClaimRepository:
         return None if value is None else _as_utc(value)
 
     async def take_over(self, dead_letter_id: str, *, expected: datetime, now: datetime) -> bool:
+        return await self._move_claim(dead_letter_id, expected=expected, now=now)
+
+    async def renew(self, dead_letter_id: str, *, expected: datetime, now: datetime) -> bool:
+        """Refresh a claim this attempt still owns. False when someone else holds it."""
+
+        return await self._move_claim(dead_letter_id, expected=expected, now=now)
+
+    async def _move_claim(self, dead_letter_id: str, *, expected: datetime, now: datetime) -> bool:
         stmt = (
             update(DeadLetterRedriveClaimORM)
             .where(
