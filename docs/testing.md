@@ -58,6 +58,6 @@
 - a redelivered event, and the unique `inventory_event_id` backstop
 - the store and SKU filters, ordering, pagination, and the 404
 
-`make lint` runs Ruff. `.github/workflows/ci.yml` is set up to run `ruff check`, `ruff format --check`, and `pytest -q`, the same checks as `make lint` and `make test`, on Ubuntu with Python 3.12 for pushes and pull requests to `main`. It needs no Postgres, Docker, or secrets. It has not run yet, because the repository has not been pushed.
+`make lint` runs Ruff. `.github/workflows/ci.yml` runs three jobs on Ubuntu 24.04 for pushes and pull requests to `main`: Ruff and `pytest -q` on SQLite with the stub LLM, the same suite on Postgres 16 (including the two-engine lock tests), and `scripts/compose_smoke.sh`. GitHub Actions run [39130397208](https://github.com/KiranKri/CatalogGuard/actions/runs/39130397208) passed all three. The Postgres job reported 109 passed and 7 skipped. Those skips are the `sqlite_only` tests. The five `postgres_only` tests passed: Alembic upgrade, two-engine outbox claims, `SKIP LOCKED` while a row lock is held, lease-token publish, and two concurrent redrives. The drain command was not part of that Postgres job or the Compose smoke.
 
 A click-by-click SQLite pass is in [manual-regression.md](manual-regression.md).

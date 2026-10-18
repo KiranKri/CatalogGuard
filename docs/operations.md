@@ -12,7 +12,7 @@ See `.env.example`. Defaults: SQLite file `catalogguard.db`, stub LLM, inline di
 docker compose up --build
 ```
 
-Compose is set up to start Postgres and the API, with `SEED_ON_STARTUP=true` and the stub provider, and the same curls in the [walkthrough](walkthrough.md) are meant to work against `http://127.0.0.1:8000`. It has not been run. `docker compose down -v` drops the database volume.
+Compose starts Postgres and the API, with `SEED_ON_STARTUP=true` and the stub provider. The Compose smoke job in GitHub Actions run [39130397208](https://github.com/KiranKri/CatalogGuard/actions/runs/39130397208) brought that stack up, ran the crossing walkthrough against `http://127.0.0.1:8000`, and ran the mailer. It did not run `python -m catalogguard.drain`. `docker compose down -v` drops the database volume.
 
 ## Scaling
 
@@ -25,7 +25,7 @@ SQLite is the dev default. Do not run two writers against one SQLite file. That 
 
 ## Draining without the API
 
-`python -m catalogguard.drain` (or `make drain`) builds the same handlers and bus as the API, drains inline until no claimable row is left, prints `{"unpublished_before": N, "unpublished_after": M}` as its last stdout line, and exits. It always drains inline, even when `EVENT_DISPATCH=async`. It is not a daemon; a scheduler can call it again. Use it when the API runs `EVENT_DISPATCH=async`, or after a crash left unpublished rows. On SQLite it creates missing tables first. On Postgres it relies on Alembic. Compose stays on inline dispatch.
+`python -m catalogguard.drain` (or `make drain`) builds the same handlers and bus as the API, drains inline until no claimable row is left, prints `{"unpublished_before": N, "unpublished_after": M}` as its last stdout line, and exits. That command is tested on SQLite only. The Compose smoke job runs the mailer, not the drain. It always drains inline, even when `EVENT_DISPATCH=async`. It is not a daemon; a scheduler can call it again. Use it when the API runs `EVENT_DISPATCH=async`, or after a crash left unpublished rows. On SQLite it creates missing tables first. On Postgres it relies on Alembic. Compose stays on inline dispatch.
 
 ## Backlog
 

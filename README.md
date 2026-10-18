@@ -1,6 +1,6 @@
 # CatalogGuard
 
-CatalogGuard shows how to make a workflow that calls an AI model safe to retry, safe to crash, and safe on a budget. When a store's stock drops below its threshold, it stores a fact-checked listing draft and queues an email draft. Nothing goes live or gets sent without a separate decision.
+CatalogGuard shows how to make a workflow that calls an AI model safe to retry, safe to crash, safe on a budget, and safe to run on several workers. When a store's stock drops below its threshold, it stores a fact-checked listing draft and queues an email draft. Nothing goes live or gets sent without a separate decision.
 
 AI coding assistants wrote the code under the author's direction; the author set the rules each change had to meet and reviewed the result.
 
@@ -40,9 +40,9 @@ What the demo shows:
 - `POST /api/v1/listings/drafts/{id}/publish` copies a ready draft onto the store's live listing.
 - `make handoff` records which queued drafts a mailer may take. It still sends nothing.
 
-**Tests:** run `make test` and `make lint`. A GitHub Actions workflow is set up to run the same checks on SQLite with the stub LLM. It has not run yet, because the repository has not been pushed.
+**Tests:** run `make test` and `make lint`. GitHub Actions run [39130397208](https://github.com/KiranKri/CatalogGuard/actions/runs/39130397208) passed three jobs: SQLite lint and tests, the suite on Postgres 16, and a Docker Compose smoke of the walkthrough plus the mailer.
 
-**Limits:** Docker Compose describes the Postgres layout, but it has not been run, so Postgres in Docker Compose is described and unproven. Two processes against one SQLite file are not supported.
+**Limits:** Proven there: the test suite, the two-engine `SKIP LOCKED` claim test and the two-engine redrive-claim test on Postgres 16, and Compose starting the API, serving the crossing walkthrough, and handing off one email draft. Not proven: load, a redrive whose process dies mid-handler (the claim can be taken over and spend a second model call), and `python -m catalogguard.drain` against Postgres. That command's fresh-database test is SQLite-only, and the smoke job runs the mailer, not the drain. Two processes against one SQLite file are still not supported.
 
 Stack: Python 3.12, FastAPI, SQLAlchemy 2, Pydantic v2, SQLite by default, Postgres in Docker Compose. FastAPI fits this service: the work is an I/O-bound catalog API plus one LLM call, with a small domain that is easier to test outside the framework.
 
