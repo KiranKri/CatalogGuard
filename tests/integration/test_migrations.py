@@ -12,6 +12,7 @@ from alembic.script import ScriptDirectory
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.sqlite_only
 def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
     database = tmp_path / "migrated.db"
     url = "sqlite+aiosqlite:///" + database.resolve().as_posix()
@@ -190,3 +191,49 @@ def test_alembic_upgrade_creates_schema(tmp_path: Path) -> None:
     assert scripts.get_revision("89e567ee29fd").down_revision == "5751f906cab6"
     assert scripts.get_revision("5751f906cab6").down_revision == "c81f0f63dcdc"
     assert scripts.get_revision("c81f0f63dcdc").down_revision == "15e685dc71f6"
+
+
+@pytest.mark.postgres_only
+async def test_alembic_upgrade_creates_schema_on_postgres() -> None:
+    from sqlalchemy import inspect
+    from tests.conftest import create_postgres_database, drop_postgres_database
+
+    name = "cg_migrate_" + os.urandom(4).hex()
+    url = await create_postgres_database(name)
+    env = os.environ.copy()
+    env["DATABASE_URL"] = url
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "catalogguard.migrate"],
+            cwd=_ROOT,
+            env=env,
+            check=True,
+        )
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(url)
+
+        def _tables(sync_connection) -> set[str]:
+            found = set(inspect(sync_connection).get_table_names())
+            columns = {col["name"] for col in inspect(sync_connection).get_columns("event_outbox")}
+            assert {"claimed_at", "claim_token", "published_at"} <= columns
+            return found
+
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(_tables)
+        await engine.dispose()
+    finally:
+        await drop_postgres_database(name)
+    assert {
+        "store_listings",
+        "llm_usage",
+        "event_outbox",
+        "alembic_version",
+        "email_suppressions",
+        "email_handoffs",
+        "dead_letter_redrives",
+        "dead_letter_redrive_claims",
+        "store_listing_revisions",
+        "inventory_changes",
+        "suppressed_crossings",
+    } <= tables

@@ -305,6 +305,7 @@ async def test_inline_dispatch_still_has_the_draft_when_the_put_returns(harness)
     assert (await client.get("/api/v1/outbox/summary")).json()["unpublished"] == 0
 
 
+@pytest.mark.sqlite_only
 def test_drain_command_on_a_fresh_database_prints_a_zero_summary(
     tmp_path, monkeypatch, capsys
 ) -> None:

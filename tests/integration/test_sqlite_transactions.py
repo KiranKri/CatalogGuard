@@ -15,6 +15,8 @@ from catalogguard.infrastructure.db.session import (
 )
 from catalogguard.infrastructure.db.uow import SqlUnitOfWork
 
+pytestmark = pytest.mark.sqlite_only
+
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 SKU = "BKPK-28L-OLV"
 HANDLER = "threshold_evaluation"

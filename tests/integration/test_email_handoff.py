@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import timedelta
 
+import pytest
 from tests.support import put_inventory
 
 from catalogguard.application.email_handoff import HandoffBatchResult
@@ -268,6 +269,7 @@ async def test_suppression_api_rejects_duplicates_and_non_opaque_ids(harness) ->
     assert (listed.json()["limit"], listed.json()["offset"]) == (10, 0)
 
 
+@pytest.mark.sqlite_only
 def test_mailer_command_runs_once_on_a_fresh_database(tmp_path, monkeypatch, capsys) -> None:
     database = (tmp_path / "fresh.db").resolve().as_posix()
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{database}")
