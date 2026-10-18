@@ -1,5 +1,7 @@
 # CatalogGuard
 
+[![CI](https://github.com/KiranKri/CatalogGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/KiranKri/CatalogGuard/actions/workflows/ci.yml)
+
 CatalogGuard shows how to make a workflow that calls an AI model safe to retry, safe to crash, safe on a budget, and safe to run on several workers. When a store's stock drops below its threshold, it stores a fact-checked listing draft and queues an email draft. Nothing goes live or gets sent without a separate decision.
 
 AI coding assistants wrote the code under the author's direction; the author set the rules each change had to meet and reviewed the result.
