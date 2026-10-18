@@ -6,7 +6,7 @@ This pass proves the demo on SQLite. Do not install Docker. Do not run `docker c
 
 Record each step as pass or fail, with the status code and the field that was wrong. Stop the manual section on the first failed expectation and report it. The automated section can finish even if a later manual step fails, but say which step failed.
 
-PowerShell 5.1 strips quotes before they reach `curl.exe`. Inventory PUTs in this document use `curl.exe --%`. Read email subjects with `curl.exe`, not `Invoke-RestMethod`. PowerShell misreads the em dash in `Only N left…` because the JSON response has no charset.
+PowerShell 5.1 strips quotes before they reach `curl.exe`. Inventory PUTs in this document use `curl.exe --%`.
 
 ## 0. Automated regression
 

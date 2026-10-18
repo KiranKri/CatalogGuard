@@ -105,7 +105,34 @@ def create_app(settings: Settings | None = None, **kwargs: object) -> FastAPI:
 
     app.include_router(ops_router)
     app.include_router(router)
+    # Outermost, so route responses, exception handlers, and validation errors
+    # all pass through. /metrics is Prometheus text and is left unchanged.
+    app.add_middleware(JsonCharsetMiddleware)
     return app
+
+
+class JsonCharsetMiddleware:
+    """Declare UTF-8 when a response is exactly application/json."""
+
+    def __init__(self, app: object) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: object, send: object) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)  # type: ignore[operator]
+            return
+
+        async def send_charset(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = []
+                for name, value in message.get("headers", []):
+                    if name.lower() == b"content-type" and value.lower() == b"application/json":
+                        value = b"application/json; charset=utf-8"
+                    headers.append((name, value))
+                message = {**message, "headers": headers}
+            await send(message)  # type: ignore[operator]
+
+        await self.app(scope, receive, send_charset)  # type: ignore[operator]
 
 
 app = create_app()

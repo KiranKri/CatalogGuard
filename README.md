@@ -354,7 +354,7 @@ What you should see:
 - Two listing drafts: the earlier `manual` one, and a `low_inventory` draft whose `trigger_event_id` is the letter's `event_id`.
 - Still one email draft. The redrive ran only the named `listing_rewrite` handler, not the email handler.
 
-Read the email subject with `curl.exe`, as above, not `Invoke-RestMethod`. PowerShell 5.1 misreads the em dash because the JSON response declares no charset. When you are done, run `Remove-Item Env:LLM_DAILY_CAP_PER_SKU` so the next start uses the `.env` value, or the default of 24.
+When you are done, run `Remove-Item Env:LLM_DAILY_CAP_PER_SKU` so the next start uses the `.env` value, or the default of 24.
 
 ## API
 
